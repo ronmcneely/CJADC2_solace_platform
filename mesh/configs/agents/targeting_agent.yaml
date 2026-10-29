@@ -1,0 +1,72 @@
+# Targeting / ISR agent: after an impact (battle damage assessment) and when a launch site keeps firing
+# (third launch), tasks imagery and nominates the site to the joint target list for operator approval.
+log:
+  stdout_log_level: INFO
+  log_file_level: INFO
+  log_file: targeting_agent.log
+
+!include ../shared_config.yaml
+
+apps:
+  - name: targeting_agent_app
+    app_base_path: .
+    app_module: solace_agent_mesh.agent.sac.app
+    broker:
+      <<: *broker_connection
+
+    app_config:
+      namespace: ${NAMESPACE, solace-agent-mesh/}
+      supports_streaming: true
+      agent_name: "TargetingAgent"
+      display_name: "Targeting & ISR Agent"
+      model: *general_model
+
+      instruction: |
+        You are the targeting and ISR agent for a joint operations center. You are invoked in two cases, and in each you MUST
+        call exactly one tool, before writing anything:
+        (a) ACTIVE LAUNCH SITE: call handle_launch_site(site_id). It pulls the launch history, tasks ISR imagery to confirm the
+            launcher, and nominates the site to the joint target list. An operator approves the nomination on the COP; nothing is
+            struck by you.
+        (b) IMPACT: call handle_impact(target_id, launch_site_id). It tasks BDA imagery on the hit asset and runs the launch-site
+            workflow for the site that fired.
+        Do not ask questions and do not claim anything the tool result does not say. Reply in at most three short lines using
+        only the result: SITE: …, TASKED: …, NOMINATED: …. Plain text, no headers.
+
+      tools:
+        - *tool_handle_launch_site
+        - *tool_handle_impact
+        - *tool_launch_site_history
+
+      session_service: *default_session_service
+      artifact_service: *default_artifact_service
+      artifact_handling_mode: "ignore"
+      auto_inject_artifact_tools: false          # keep the prompt small for a local model
+      enable_embed_resolution: false
+      enable_auto_continuation: false     # a reply cut at max_tokens is done; a second LLM call on a CPU is not worth the tail
+      enable_artifact_content_instruction: false
+      inject_system_purpose: false
+      inject_response_format: false
+      data_tools_config: *default_data_tools_config
+      auto_summarization: *default_auto_summarization
+
+      agent_card:
+        description: |
+          Targeting and ISR agent. Tasks imagery for battle damage assessment and launcher confirmation, and nominates
+          hostile launch sites to the joint target list for operator approval.
+        defaultInputModes: [text]
+        defaultOutputModes: [text]
+        skills:
+          - id: isr_tasking
+            name: ISR tasking
+            description: Tasks EO/SAR imagery against a launch site or an impact point.
+          - id: target_nomination
+            name: Target nomination
+            description: Nominates a launch site to the joint target list with the launch history as justification.
+      agent_card_publishing:
+        interval_seconds: 10
+      agent_discovery:
+        enabled: true
+      inter_agent_communication:
+        allow_list: []
+        deny_list: []
+        request_timeout_seconds: 300

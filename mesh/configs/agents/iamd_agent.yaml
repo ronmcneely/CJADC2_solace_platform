@@ -1,0 +1,71 @@
+# IAMD agent: triggered by every missile / drone launch on the mesh (see gateways/cop_events.yaml).
+# Recommends the engagement (a human approves on the COP), tells the host nation, warns airspace and shipping.
+log:
+  stdout_log_level: INFO
+  log_file_level: INFO
+  log_file: iamd_agent.log
+
+!include ../shared_config.yaml
+
+apps:
+  - name: iamd_agent_app
+    app_base_path: .
+    app_module: solace_agent_mesh.agent.sac.app
+    broker:
+      <<: *broker_connection
+
+    app_config:
+      namespace: ${NAMESPACE, solace-agent-mesh/}
+      supports_streaming: true
+      agent_name: "IamdAgent"
+      display_name: "IAMD Duty Agent"
+      model: *general_model
+
+      instruction: |
+        You are the Integrated Air and Missile Defense (IAMD) duty agent on a joint common operating picture.
+        You are invoked when a hostile missile or one-way-attack drone is LAUNCHED at a friendly ship or base.
+        Time matters: the inbound may arrive in under a minute. You MUST call the tool handle_launch(track_id) exactly once,
+        before writing anything: it reads the inbound, publishes the ENGAGE recommendation for the operator (you never fire;
+        an operator approves on the COP), sends the FLASH notification to the host nation (or the coalition maritime watch
+        for a ship) and warns airspace and shipping. Do not describe these steps as done unless the tool result says so.
+        After the tool returns, reply in at most four short lines of plain words, never JSON, braces or quotes:
+        THREAT: <weapon> from <launch site> at <target>, <tti> s · RECOMMENDED: engage <track id>, awaiting approval ·
+        NOTIFIED: <recipient names> · NOTE: <what the operator must know, e.g. the asset's own defenses>. No headers, no questions.
+
+      tools:
+        - *tool_handle_launch
+        - *tool_get_inbound_threat
+
+      session_service: *default_session_service
+      artifact_service: *default_artifact_service
+      artifact_handling_mode: "ignore"
+      auto_inject_artifact_tools: false          # keep the prompt small for a local model
+      enable_embed_resolution: false
+      enable_auto_continuation: false     # a reply cut at max_tokens is done; a second LLM call on a CPU is not worth the tail
+      enable_artifact_content_instruction: false
+      inject_system_purpose: false
+      inject_response_format: false
+      data_tools_config: *default_data_tools_config
+      auto_summarization: *default_auto_summarization
+
+      agent_card:
+        description: |
+          IAMD duty agent. On a missile or drone launch it recommends the engagement for operator approval,
+          notifies the host nation (or the coalition maritime watch for a ship) and warns airspace and shipping.
+        defaultInputModes: [text]
+        defaultOutputModes: [text]
+        skills:
+          - id: engagement_recommendation
+            name: Engagement recommendation
+            description: Recommends ENGAGE / WEAPONS FREE / WARN ASSET / TRACK on an inbound missile or drone for human approval on the COP.
+          - id: host_nation_notification
+            name: Host-nation and partner notification
+            description: FLASH notification to the host nation's air-defence watch, or CTF-153/UKMTO for ships, and NOTAM/NAVWARN for the corridor.
+      agent_card_publishing:
+        interval_seconds: 10
+      agent_discovery:
+        enabled: true
+      inter_agent_communication:
+        allow_list: []
+        deny_list: []
+        request_timeout_seconds: 300

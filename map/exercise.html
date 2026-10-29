@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Exercise Control · Launch Injector</title>
+<script src="vendor/mqtt.min.js"></script>
+<style>
+  /* Exercise control for a second monitor: the white cell stages a drone wave or a missile at a US or a
+     coalition asset on cue. One button = one message on cop/c2/action/v1/centcom/exercise/{scenario}/inject,
+     the same message scripts/inject.py sends; the generator launches, and the launch confirmations come
+     back on cop/air/{missile|uas}-event like any other event. Nothing here talks to the simulator directly. */
+  :root { --bg:#060a10; --panel:#0b121c; --panel2:#0f1826; --line:#1b2a3d; --ink:#e6edf7; --ink2:#9fb0c8; --ink3:#5f7190;
+          --crit:#e63950; --high:#ff9f1c; --good:#21c77a; --blue:#4c9be8; --cyan:#00d4ff; --us:#4c9be8; --coal:#e63950; }
+  * { box-sizing:border-box; }
+  html, body { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:13px/1.35 "Cascadia Mono", Consolas, "Courier New", monospace; overflow:hidden;
+         background-image: radial-gradient(circle at 50% 120%, #0b1a2c 0, transparent 60%); }
+  .hdr { height:58px; display:flex; align-items:center; gap:18px; padding:0 16px; background:linear-gradient(180deg,#0e1726,#0a111c); border-bottom:1px solid var(--line); }
+  .hdr .title { font-size:16px; font-weight:bold; letter-spacing:3px; white-space:nowrap; } .hdr .title small { display:block; font-size:9px; letter-spacing:2px; color:var(--ink3); font-weight:normal; }
+  .hdr .z { margin-left:auto; text-align:right; font-size:19px; letter-spacing:2px; } .hdr .z small { display:block; font-size:9px; color:var(--ink3); letter-spacing:2px; }
+  .pill { font-size:10px; letter-spacing:1.5px; padding:4px 9px; border:1px solid var(--line); border-radius:3px; color:var(--ink2); white-space:nowrap; }
+  .pill i { font-style:normal; display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--ink3); margin-right:6px; vertical-align:middle; }
+  .pill.up i { background:var(--good); box-shadow:0 0 6px var(--good); } .pill.down i { background:var(--crit); }
+  .pill b { color:var(--ink); }
+  .wrap { height:calc(100vh - 58px); display:grid; grid-template-columns: 460px 1fr; gap:10px; padding:10px 12px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:4px; display:flex; flex-direction:column; min-height:0; }
+  .panel h2 { margin:0; padding:8px 12px; font-size:10px; letter-spacing:2px; color:var(--ink2); border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; }
+  .body { padding:10px 12px; overflow:auto; flex:1; }
+  .step { font-size:9px; letter-spacing:2px; color:var(--ink3); margin:10px 0 6px; } .step:first-child { margin-top:0; }
+  .seg { display:grid; gap:6px; } .seg.two { grid-template-columns:1fr 1fr; } .seg.three { grid-template-columns:1fr 1fr 1fr; }
+  .opt { border:1px solid var(--line); border-radius:4px; background:var(--panel2); color:var(--ink); font-family:inherit; cursor:pointer; padding:10px; text-align:left; }
+  .opt b { display:block; font-size:12px; letter-spacing:1.5px; } .opt span { display:block; font-size:10px; color:var(--ink2); margin-top:3px; line-height:1.3; }
+  .opt:hover { border-color:var(--ink3); }
+  .opt.on.us { border-color:var(--us); box-shadow:0 0 8px rgba(76,155,232,.35); } .opt.on.us b { color:var(--us); }
+  .opt.on.coal { border-color:var(--coal); box-shadow:0 0 8px rgba(230,57,80,.35); } .opt.on.coal b { color:var(--coal); }
+  .opt.on.w { border-color:var(--high); box-shadow:0 0 8px rgba(255,159,28,.3); } .opt.on.w b { color:var(--high); }
+  select, input[type=number] { width:100%; background:#0a1220; color:var(--ink); border:1px solid var(--line); border-radius:3px; font-family:inherit; font-size:12px; padding:7px 8px; }
+  select:focus, input:focus { outline:none; border-color:var(--cyan); }
+  .row { display:grid; grid-template-columns: 1fr 110px; gap:6px; }
+  .launch { margin-top:12px; width:100%; border:1px solid var(--high); border-radius:4px; background:rgba(255,159,28,.08); color:var(--high); font-family:inherit; font-size:15px; font-weight:bold; letter-spacing:4px; padding:14px; cursor:pointer; }
+  .launch:hover { background:rgba(255,159,28,.18); } .launch:disabled { opacity:.45; cursor:default; }
+  .launch.us { border-color:var(--us); color:var(--us); background:rgba(76,155,232,.08); } .launch.us:hover { background:rgba(76,155,232,.18); }
+  .launch.coal { border-color:var(--coal); color:var(--coal); background:rgba(230,57,80,.08); } .launch.coal:hover { background:rgba(230,57,80,.18); }
+  .summary { margin-top:8px; font-size:11px; color:var(--ink2); line-height:1.5; min-height:34px; } .summary b { color:var(--ink); }
+  .flow { margin-top:8px; padding:7px 9px; border-radius:3px; border:1px solid var(--line); background:#0a1220; font-size:10px; color:var(--ink2); line-height:1.45; }
+  .flow.us { border-left:3px solid var(--us); } .flow.coal { border-left:3px solid var(--coal); } .flow b { color:var(--ink); }
+  .quick { display:grid; grid-template-columns:1fr 1fr 1fr; gap:6px; }
+  .quick button { border:1px solid var(--line); border-radius:4px; background:transparent; color:var(--ink2); font-family:inherit; font-size:10px; letter-spacing:1px; padding:8px 6px; cursor:pointer; line-height:1.3; }
+  .quick button b { display:block; color:var(--ink); font-size:11px; letter-spacing:1.5px; } .quick button:hover { border-color:var(--cyan); color:var(--ink); }
+  .hint { color:var(--ink3); font-size:10px; margin:8px 0 0; line-height:1.4; } .hint code { color:var(--ink2); }
+  .kpis { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; padding:10px 12px 0; }
+  .kpi { background:var(--panel2); border:1px solid var(--line); border-radius:3px; padding:6px 9px; } .kpi small { display:block; font-size:8px; letter-spacing:1.5px; color:var(--ink3); } .kpi b { font-size:18px; }
+  .kpi b.red { color:var(--crit); } .kpi b.blue { color:var(--us); } .kpi b.orange { color:var(--high); } .kpi b.green { color:var(--good); }
+  .ev { border:1px solid var(--line); border-left:3px solid var(--ink3); border-radius:3px; padding:7px 10px; margin-bottom:7px; background:var(--panel2); display:grid; grid-template-columns: 1fr auto; gap:4px 10px; }
+  .ev.us { border-left-color:var(--us); } .ev.coal { border-left-color:var(--coal); } .ev.staged { border-left-color:var(--high); border-style:dashed; }
+  .ev.done { opacity:.6; }
+  .ev .h { font-weight:bold; font-size:12px; } .ev .h .aff { font-size:9px; letter-spacing:1.5px; padding:1px 6px; border-radius:2px; margin-right:6px; vertical-align:1px; }
+  .ev .aff.us { background:rgba(76,155,232,.18); color:var(--us); } .ev .aff.coal { background:rgba(230,57,80,.18); color:var(--coal); } .ev .aff.stg { background:rgba(255,159,28,.18); color:var(--high); }
+  .ev .t { color:var(--ink3); font-size:10px; text-align:right; white-space:nowrap; }
+  .ev .d { grid-column:1 / -1; color:var(--ink2); font-size:11px; } .ev .d b { color:var(--ink); }
+  .ev .st { grid-column:1 / -1; font-size:10px; letter-spacing:1px; margin-top:2px; } .ev .st.inflight { color:var(--high); } .ev .st.kill { color:var(--good); } .ev .st.impact { color:var(--crit); } .ev .st.wait { color:var(--ink3); }
+  .empty { color:var(--ink3); font-size:11px; padding:20px; text-align:center; line-height:1.6; }
+  svg { vertical-align:-2px; }
+</style>
+</head>
+<body>
+<div class="hdr">
+  <div class="title">⚑ EXERCISE CONTROL<small>WHITE CELL · LAUNCH INJECTOR · MISSILE &amp; DRONE SCENARIOS</small></div>
+  <span class="pill" id="conn"><i></i>BROKER</span>
+  <span class="pill" title="live targets known to this page">TARGETS <b id="ntargets">0</b></span>
+  <div class="z"><span id="clock">--:--:--</span>Z<small>EXERCISE TIME</small></div>
+</div>
+<div class="wrap">
+  <div class="panel">
+    <h2>STAGE A LAUNCH <span style="color:var(--ink3);font-weight:normal">one message · the generator fires</span></h2>
+    <div class="body">
+      <div class="step">1 · WHOSE ASSET IS THE TARGET</div>
+      <div class="seg two">
+        <button class="opt us on" id="aff-us" onclick="setAff('us')"><b>US ASSET</b><span>ship or base · IAMD / ship-defense agents · blue AGENT MESH panel</span></button>
+        <button class="opt coal" id="aff-coal" onclick="setAff('coalition')"><b>COALITION PARTNER</b><span>partner base or ship · partner notified, US options · red board</span></button>
+      </div>
+      <div class="step">2 · WEAPON</div>
+      <div class="seg three">
+        <button class="opt w on" id="w-uas" onclick="setWeapon('uas')"><b>DRONE WAVE</b><span>one-way attack UAS, 2–5 airframes, minutes of flight</span></button>
+        <button class="opt w" id="w-ballistic" onclick="setWeapon('ballistic')"><b>BALLISTIC MISSILE</b><span>SRBM / MRBM / ASBM, 40–90 s of flight</span></button>
+        <button class="opt w" id="w-cruise" onclick="setWeapon('cruise')"><b>CRUISE MISSILE</b><span>low, slow, minutes of flight</span></button>
+      </div>
+      <div class="step">3 · TARGET</div>
+      <div class="row">
+        <select id="target"><option value="">Random — any asset of that kind in range</option></select>
+        <input type="number" id="wave" min="1" max="6" value="3" title="wave size (drones)">
+      </div>
+      <div class="step">4 · LAUNCH SITE</div>
+      <select id="site">
+        <option value="">Any site with the weapon and the target in range</option>
+        <option value="LS-IR-01">LS-IR-01 · Bandar Abbas coastal battery (IR) · ASBM SRBM CM UAS</option>
+        <option value="LS-IR-02">LS-IR-02 · Shiraz missile base (IR) · MRBM SRBM</option>
+        <option value="LS-IR-03">LS-IR-03 · Chabahar launch site (IR) · ASBM UAS CM</option>
+        <option value="LS-IR-04">LS-IR-04 · Kermanshah underground complex (IR) · MRBM</option>
+        <option value="LS-YE-01">LS-YE-01 · Sanaa launch area (Houthi) · MRBM CM UAS</option>
+        <option value="LS-YE-02">LS-YE-02 · Hodeidah coastal site (Houthi) · ASBM UAS CM</option>
+        <option value="LS-YE-03">LS-YE-03 · Saada hills (Houthi) · SRBM UAS</option>
+      </select>
+      <button class="launch us" id="go" onclick="launch()">▶ LAUNCH</button>
+      <div class="summary" id="summary"></div>
+      <div class="flow us" id="flow"></div>
+      <div class="step">QUICK SCENARIOS</div>
+      <div class="quick">
+        <button onclick="quick('ship-attack')"><b>SHIP ATTACK</b>drone wave at a US ship, missile 25 s later</button>
+        <button onclick="quick('site-active')"><b>SITE ACTIVE</b>3 missiles from one site → targeting agent</button>
+        <button onclick="quick('probe')"><b>HOSTILE PROBE</b>hostile aircraft turns toward a US ship</button>
+      </div>
+      <div class="hint">Publishes <code>cop/c2/action/v1/centcom/exercise/{scenario}/inject</code> as <code>cop-viewer</code> — the same message as <code>scripts/inject.py</code>. The generator picks a site with the target in reach — Houthi sites fight the Red Sea, Bab el-Mandeb, Gulf of Aden and southern Saudi; Iranian sites the Gulf, Gulf of Oman, Iraq, the GCC and the Levant — and if nothing can reach the target, the log says so and nothing flies. Random tempo is off (<code>MISSILE_AUTO=1</code> turns it back on).</div>
+    </div>
+  </div>
+  <div class="panel">
+    <h2>LAUNCH LOG <span style="color:var(--ink3);font-weight:normal">confirmations from cop/air/missile-event &amp; uas-event · outcomes as they happen</span></h2>
+    <div class="kpis">
+      <div class="kpi"><small>STAGED</small><b id="k-staged" class="orange">0</b></div>
+      <div class="kpi"><small>IN FLIGHT</small><b id="k-flight" class="red">0</b></div>
+      <div class="kpi"><small>INTERCEPTED</small><b id="k-kill" class="green">0</b></div>
+      <div class="kpi"><small>IMPACTS</small><b id="k-impact" class="red">0</b></div>
+    </div>
+    <div class="body" id="log"><div class="empty">Nothing staged yet.<br>Pick a target and press LAUNCH — the launch shows here within a second or two, and on the map as a hostile track from the launch site.</div></div>
+  </div>
+</div>
+<script>
+  const $ = id => document.getElementById(id);
+  const q = new URLSearchParams(location.search);
+  const cfg = { broker: q.get('broker') || ('ws://' + location.hostname + ':8000'), username: q.get('username') || 'cop-viewer', password: q.get('password') || 'cop-demo', operator: q.get('operator') || 'exercise-control' };
+  const lvl = s => String(s || 'unknown').toLowerCase().replace(/[^a-z0-9_.-]+/g, '-');
+
+        const FLAG_SVG = {
+      US: '<rect width="30" height="20" fill="#B22234"/><g fill="#fff"><rect y="1.54" width="30" height="1.54"/><rect y="4.62" width="30" height="1.54"/><rect y="7.69" width="30" height="1.54"/><rect y="10.77" width="30" height="1.54"/><rect y="13.85" width="30" height="1.54"/><rect y="16.92" width="30" height="1.54"/></g><rect width="12" height="10.77" fill="#3C3B6E"/><g fill="#fff"><circle cx="2" cy="2" r="0.8"/><circle cx="5" cy="2" r="0.8"/><circle cx="8" cy="2" r="0.8"/><circle cx="11" cy="2" r="0.8"/><circle cx="3.5" cy="4.2" r="0.8"/><circle cx="6.5" cy="4.2" r="0.8"/><circle cx="9.5" cy="4.2" r="0.8"/><circle cx="2" cy="6.4" r="0.8"/><circle cx="5" cy="6.4" r="0.8"/><circle cx="8" cy="6.4" r="0.8"/><circle cx="11" cy="6.4" r="0.8"/><circle cx="3.5" cy="8.6" r="0.8"/><circle cx="6.5" cy="8.6" r="0.8"/><circle cx="9.5" cy="8.6" r="0.8"/></g>',
+      GBR: '<rect width="30" height="20" fill="#012169"/><path d="M0 0L30 20M30 0L0 20" stroke="#fff" stroke-width="4"/><path d="M0 0L30 20M30 0L0 20" stroke="#C8102E" stroke-width="1.6"/><path d="M15 0V20M0 10H30" stroke="#fff" stroke-width="6"/><path d="M15 0V20M0 10H30" stroke="#C8102E" stroke-width="3.5"/>',
+      AUS: '<rect width="30" height="20" fill="#012169"/><path d="M0 0L15 10M15 0L0 10" stroke="#fff" stroke-width="2.2"/><path d="M0 0L15 10M15 0L0 10" stroke="#C8102E" stroke-width="0.9"/><path d="M7.5 0V10M0 5H15" stroke="#fff" stroke-width="3"/><path d="M7.5 0V10M0 5H15" stroke="#C8102E" stroke-width="1.8"/><g fill="#fff"><circle cx="22" cy="5" r="1.1"/><circle cx="25.5" cy="9" r="1.1"/><circle cx="22" cy="15" r="1.1"/><circle cx="18.5" cy="10" r="1"/><circle cx="7.5" cy="15.5" r="1.8"/></g>',
+      FRA: '<rect width="10" height="20" fill="#0055A4"/><rect x="10" width="10" height="20" fill="#fff"/><rect x="20" width="10" height="20" fill="#EF4135"/>',
+      DEU: '<rect width="30" height="6.67" fill="#000"/><rect y="6.67" width="30" height="6.67" fill="#DD0000"/><rect y="13.33" width="30" height="6.67" fill="#FFCE00"/>',
+      JPN: '<rect width="30" height="20" fill="#fff"/><circle cx="15" cy="10" r="6" fill="#BC002D"/>',
+      YE:  '<rect width="30" height="6.67" fill="#CE1126"/><rect y="6.67" width="30" height="6.67" fill="#fff"/><rect y="13.33" width="30" height="6.67" fill="#000"/>',
+      SAU: '<rect width="30" height="20" fill="#006C35"/><rect x="7" y="7" width="16" height="2.2" fill="#fff"/><rect x="7" y="11" width="16" height="1.6" fill="#fff"/>',
+      ARE: '<rect width="30" height="20" fill="#00732F"/><rect y="6.67" width="30" height="6.67" fill="#fff"/><rect y="13.33" width="30" height="6.67" fill="#000"/><rect width="8" height="20" fill="#FF0000"/>',
+      QAT: '<rect width="30" height="20" fill="#8A1538"/><path d="M0 0H9L11 1.1L9 2.2L11 3.3L9 4.4L11 5.5L9 6.6L11 7.7L9 8.8L11 9.9L9 11L11 12.1L9 13.2L11 14.3L9 15.4L11 16.5L9 17.6L11 18.7L9 20H0Z" fill="#fff"/>',
+      KWT: '<rect width="30" height="6.67" fill="#007A3D"/><rect y="6.67" width="30" height="6.67" fill="#fff"/><rect y="13.33" width="30" height="6.67" fill="#CE1126"/><path d="M0 0L7 5V15L0 20Z" fill="#000"/>',
+      BHR: '<rect width="30" height="20" fill="#CE1126"/><path d="M0 0H8L11 2.5L8 5L11 7.5L8 10L11 12.5L8 15L11 17.5L8 20H0Z" fill="#fff"/>',
+      JOR: '<rect width="30" height="6.67" fill="#000"/><rect y="6.67" width="30" height="6.67" fill="#fff"/><rect y="13.33" width="30" height="6.67" fill="#007A3D"/><path d="M0 0L13 10L0 20Z" fill="#CE1126"/>',
+      DJI: '<rect width="30" height="10" fill="#6AB2E7"/><rect y="10" width="30" height="10" fill="#12AD2B"/><path d="M0 0L13 10L0 20Z" fill="#fff"/>',
+      OMN: '<rect width="30" height="20" fill="#fff"/><rect y="6.67" width="30" height="6.67" fill="#DB161B"/><rect y="13.33" width="30" height="6.67" fill="#008000"/><rect width="8" height="20" fill="#DB161B"/>',
+      TUR: '<rect width="30" height="20" fill="#E30A17"/><circle cx="12" cy="10" r="5" fill="#fff"/><circle cx="13.5" cy="10" r="4" fill="#E30A17"/>',
+      CYP: '<rect width="30" height="20" fill="#fff"/><ellipse cx="15" cy="9" rx="6" ry="4" fill="#D57800"/><path d="M11 15H19" stroke="#4E5B31" stroke-width="1.4"/>',
+      IRQ: '<rect width="30" height="6.67" fill="#CE1126"/><rect y="6.67" width="30" height="6.67" fill="#fff"/><rect y="13.33" width="30" height="6.67" fill="#000"/>',
+      RU: '<rect width="30" height="6.67" fill="#fff"/><rect y="6.67" width="30" height="6.67" fill="#0039A6"/><rect y="13.33" width="30" height="6.67" fill="#D52B1E"/>',
+      CN: '<rect width="30" height="20" fill="#DE2910"/><polygon fill="#FFDE00" points="5,2 6.2,5.6 10,5.6 6.9,7.8 8.1,11.4 5,9.2 1.9,11.4 3.1,7.8 0,5.6 3.8,5.6"/><g fill="#FFDE00"><circle cx="12" cy="2.5" r="0.9"/><circle cx="14" cy="4.8" r="0.9"/><circle cx="14" cy="7.8" r="0.9"/><circle cx="12" cy="10" r="0.9"/></g>',
+      IR: '<rect width="30" height="6.67" fill="#239F40"/><rect y="6.67" width="30" height="6.67" fill="#fff"/><rect y="13.33" width="30" height="6.67" fill="#DA0000"/><circle cx="15" cy="10" r="2.6" fill="none" stroke="#DA0000" stroke-width="1.1"/><rect x="14.4" y="7.2" width="1.2" height="5.6" fill="#DA0000"/>',
+      KP: '<rect width="30" height="20" fill="#024FA2"/><rect y="4.5" width="30" height="11" fill="#fff"/><rect y="5.3" width="30" height="9.4" fill="#ED1C27"/><circle cx="10" cy="10" r="3.8" fill="#fff"/><polygon fill="#ED1C27" points="10,6.6 11,9.5 14,9.5 11.6,11.3 12.5,14.2 10,12.4 7.5,14.2 8.4,11.3 6,9.5 9,9.5"/>',
+      UK: '<rect width="30" height="20" fill="#012169"/><path d="M0,0 L30,20 M30,0 L0,20" stroke="#fff" stroke-width="4"/><path d="M0,0 L30,20 M30,0 L0,20" stroke="#C8102E" stroke-width="1.6"/><path d="M15,0 V20 M0,10 H30" stroke="#fff" stroke-width="6"/><path d="M15,0 V20 M0,10 H30" stroke="#C8102E" stroke-width="3.2"/>',
+      VZ: '<rect width="30" height="6.67" fill="#FCD116"/><rect y="6.67" width="30" height="6.67" fill="#003893"/><rect y="13.33" width="30" height="6.67" fill="#CF142B"/>',
+  };
+
+  function flagSvg(c, h) {
+    const body = FLAG_SVG[c] || '<rect width="30" height="20" fill="#555"/>';
+    const w = Math.round(h * 1.5);
+    return '<svg viewBox="0 0 30 20" width="'+w+'" height="'+h+'" style="border:1px solid rgba(0,0,0,0.35);border-radius:2px">'+body+'</svg>';
+  }
+  const CC = { 'Qatar':'QAT','UAE':'ARE','Kuwait':'KWT','Bahrain':'BHR','Saudi Arabia':'SAU','Iraq':'IRQ','Turkey':'TUR','Jordan':'JOR','Djibouti':'DJI','Oman':'OMN','Cyprus':'CYP' };
+  const CNAME = { GBR:'United Kingdom', FRA:'France', AUS:'Australia', DEU:'Germany', JPN:'Japan', SAU:'Saudi Arabia', ARE:'UAE', QAT:'Qatar', KWT:'Kuwait', BHR:'Bahrain', JOR:'Jordan', DJI:'Djibouti', OMN:'Oman', TUR:'Turkey', CYP:'Cyprus', IRQ:'Iraq', US:'United States', IR:'Iran', YE:'Yemen (Houthi)' };
+  const flag = c => flagSvg(c, 12) + ' <b>' + (c || '') + '</b>';
+
+  // Static targets, the same lists the simulator aims at (sim/generator.py). Ships arrive live from the broker.
+  const US_FAC = [['FAC-001','Al Udeid AB','Qatar'],['FAC-002','Al Dhafra AB','UAE'],['FAC-003','Camp Arifjan','Kuwait'],['FAC-004','NSA Bahrain','Bahrain'],['FAC-005','Prince Sultan AB','Saudi Arabia'],['FAC-006','Al Asad AB','Iraq'],['FAC-007','Incirlik AB','Turkey'],['FAC-009','Muwaffaq Salti AB','Jordan'],['FAC-010','Ali Al Salem AB','Kuwait'],['FAC-012','Camp Lemonnier','Djibouti'],['FAC-013','Chabelley Airfield','Djibouti']];
+  const COAL_FAC = [['COAL-GBR-AKROTIRI','RAF Akrotiri','GBR'],['COAL-GBR-JUFAIR','UK NSF Bahrain (HMS Jufair)','GBR'],['COAL-FRA-ABUDHABI','French Forces UAE (Camp de la Paix)','FRA'],['COAL-AUS-MINHAD','Al Minhad AB (Australian det.)','AUS'],['COAL-JPN-DJIBOUTI','JSDF Base Djibouti','JPN'],['COAL-SAU-JIZAN','King Abdullah AB Jizan','SAU'],['COAL-SAU-KKMC','King Khalid Military City','SAU'],['COAL-ARE-FUJAIRAH','Fujairah Naval Base','ARE']];
+  const usShips = {}, coalShips = {};          // hull -> {name, country}; track_id -> {name, nation}
+
+  let aff = 'us', weapon = 'uas';
+  function setAff(a) {
+    aff = a;
+    $('aff-us').classList.toggle('on', a === 'us'); $('aff-coal').classList.toggle('on', a !== 'us');
+    $('go').className = 'launch ' + (a === 'us' ? 'us' : 'coal'); $('flow').className = 'flow ' + (a === 'us' ? 'us' : 'coal');
+    fillTargets(); describe();
+  }
+  function setWeapon(w) {
+    weapon = w;
+    ['uas','ballistic','cruise'].forEach(k => $('w-' + k).classList.toggle('on', k === w));
+    $('wave').disabled = w !== 'uas';
+    describe();
+  }
+  function fillTargets() {
+    const sel = $('target'), keep = sel.value; sel.innerHTML = '';
+    const add = (grp, items) => { if (!items.length) return; const g = document.createElement('optgroup'); g.label = grp; items.forEach(([id, label]) => { const o = document.createElement('option'); o.value = id; o.textContent = label; g.appendChild(o); }); sel.appendChild(g); };
+    const rnd = document.createElement('option'); rnd.value = ''; rnd.textContent = 'Random — any ' + (aff === 'us' ? 'US' : 'coalition') + ' asset in range'; sel.appendChild(rnd);
+    if (aff === 'us') {
+      add('US ships (live)', Object.entries(usShips).sort().map(([h, s]) => [h, h + ' · ' + s.name]));
+      add('US bases', US_FAC.map(([id, n, c]) => [id, n + ' · ' + c]));
+    } else {
+      add('Partner ships (live, from the coalition C2 feed)', Object.entries(coalShips).sort().map(([t, s]) => [t, t + ' · ' + s.name + ' · ' + (CNAME[s.nation] || s.nation)]));
+      add('Partner bases', COAL_FAC.map(([id, n, c]) => [id, n + ' · ' + (CNAME[c] || c)]));
+    }
+    sel.value = keep; if (sel.value !== keep) sel.value = '';
+    $('ntargets').textContent = Object.keys(usShips).length + US_FAC.length + Object.keys(coalShips).length + COAL_FAC.length;
+  }
+  function targetLabel(id) {
+    if (!id) return null;
+    const o = [...$('target').options].find(o => o.value === id); return o ? o.textContent : id;
+  }
+  function describe() {
+    const t = $('target').value, n = +$('wave').value || 3;
+    const w = weapon === 'uas' ? ('drone wave of <b>' + n + '</b>') : weapon === 'ballistic' ? '<b>ballistic missile</b>' : '<b>cruise missile</b>';
+    $('summary').innerHTML = w + ' at ' + (t ? '<b>' + targetLabel(t) + '</b>' : 'a random <b>' + (aff === 'us' ? 'US' : 'coalition') + '</b> asset') + ($('site').value ? ' from <b>' + $('site').value + '</b>' : '');
+    $('flow').innerHTML = aff === 'us'
+      ? '<b>US workflow:</b> alerting routes the launch to <b>…/inbound/…/us</b> → IamdAgent recommends ENGAGE on the blue AGENT MESH panel (APPROVE / REJECT), host nation gets a FLASH, NOTAM + NAVWARN go out. A launch at a <b>ship</b> also wakes ShipDefenseAgent: OOD + Damage Control Central, 1MC options on ship.html.'
+      : '<b>Coalition workflow:</b> alerting routes the launch to <b>…/inbound/…/coalition</b> → the standing watch notifies the partner\'s national authority at once, CoalitionLiaisonAgent lists the US ships and bases in reach on the red board → TARGET FROM US / STANDBY &amp; MONITOR / PARTNER ENGAGED / END EVENT, partner told at each step.';
+  }
+  ['target','wave','site'].forEach(id => $(id).addEventListener('change', describe));
+
+  // ---- publish -------------------------------------------------------------------------------------
+  const client = mqtt.connect(cfg.broker, { username: cfg.username, password: cfg.password, clientId: 'exercise-' + Math.random().toString(16).slice(2, 8), keepalive: 30, reconnectPeriod: 2000, protocolVersion: 4, clean: true });
+  client.on('connect', () => { $('conn').className = 'pill up'; ['cop/sea/track/#', 'cop/intel/coalition-naval/#', 'cop/air/missile-event/#', 'cop/air/uas-event/#'].forEach(t => client.subscribe(t, { qos: 0 })); });
+  client.on('close', () => { $('conn').className = 'pill down'; }); client.on('error', () => { $('conn').className = 'pill down'; });
+
+  const staged = [];                                   // what this page asked for, newest first, matched to launches as they arrive
+  const events = {};                                   // track_id -> card
+  function inject(scenario, extra) {
+    const body = Object.assign({ action: 'inject', domain: 'EXERCISE', scenario, operator: cfg.operator, timestamp: Date.now() }, extra || {});
+    client.publish('cop/c2/action/v1/centcom/exercise/' + scenario + '/inject', JSON.stringify(body), { qos: 1 });
+    const card = document.createElement('div'); card.className = 'ev staged';
+    card.innerHTML = '<div class="h"><span class="aff stg">STAGED</span>' + body.label + '</div><div class="t">' + hhmm() + '</div><div class="st wait">waiting for the generator… (no card within 6 s = no launch site has that target in range)</div>';
+    const log = $('log'); if (log.firstChild && log.firstChild.className === 'empty') log.innerHTML = '';
+    log.prepend(card);
+    staged.unshift({ body, card, at: Date.now() });
+    k('staged', +$('k-staged').textContent + 1);
+    setTimeout(() => { if (!card.dataset.matched) card.querySelector('.st').innerHTML = '<span style="color:var(--crit)">no launch</span> — no site has that weapon with the target in range. Pick a closer site or another target (the generator pane says <code>[MSL] no launch site has … in range</code>).'; }, 6000);
+  }
+  function launch() {
+    const t = $('target').value, n = +$('wave').value || 3, site = $('site').value || null;
+    const scenario = weapon === 'uas' ? 'uas' : 'missile';
+    const label = (weapon === 'uas' ? 'DRONE WAVE ×' + n : weapon === 'ballistic' ? 'BALLISTIC MISSILE' : 'CRUISE MISSILE') + ' → ' + (t ? targetLabel(t) : 'random ' + (aff === 'us' ? 'US' : 'coalition') + ' asset');
+    inject(scenario, { target_id: t || null, target_kind: t ? null : aff, n: weapon === 'uas' ? n : null, site_id: site, weapon_class: weapon === 'uas' ? null : weapon, label });
+  }
+  function quick(s) {
+    const t = $('target').value;
+    const isUsShip = t && usShips[t];
+    if (s === 'ship-attack') inject('ship-attack', { target_id: isUsShip ? t : null, n: +$('wave').value || 3, label: 'SHIP ATTACK → ' + (isUsShip ? targetLabel(t) : 'random US ship') });
+    if (s === 'site-active') inject('site-active', { site_id: $('site').value || null, target_id: t || null, label: 'SITE ACTIVE · 3 missiles from ' + ($('site').value || 'a random site') });
+    if (s === 'probe') inject('probe', { target_id: isUsShip ? t : null, label: 'HOSTILE PROBE → ' + (isUsShip ? targetLabel(t) : 'random US ship') });
+  }
+
+  // ---- live picture --------------------------------------------------------------------------------
+  function hhmm() { return new Date().toISOString().slice(11, 19) + 'Z'; }
+  function k(id, v) { $('k-' + id).textContent = v; }
+  function countFlight() { k('flight', Object.values(events).filter(e => e.live).length); }
+  client.on('message', (topic, payload) => {
+    let r; try { r = JSON.parse(payload.toString()); } catch (e) { return; }
+    const p = topic.split('/');
+    if (p[1] === 'sea' && p[2] === 'track') {
+      if (r.country === 'US' && r.vessel_class !== 'SUBMARINE' && r.hull_number) { const fresh = !usShips[r.hull_number]; usShips[r.hull_number] = { name: r.vessel_type, country: 'US' }; if (fresh && aff === 'us') fillTargets(); }
+      return;
+    }
+    if (p[1] === 'intel' && p[2] === 'coalition-naval') {
+      if (r.track_id) { const fresh = !coalShips[r.track_id]; coalShips[r.track_id] = { name: r.vessel_name || 'partner vessel', nation: r.nation }; if (fresh && aff !== 'us') fillTargets(); }
+      return;
+    }
+    if (p[1] !== 'air' || !/-event$/.test(p[2])) return;
+    const ev = r.event || p[7];
+    if (ev === 'launch' || ev === 'launch-member') onLaunch(r, ev === 'launch');
+    else if (ev === 'intercepted' || ev === 'impact' || ev === 'terminal') onOutcome(r, ev);
+  });
+  function onLaunch(r, lead) {
+    const key = r.wave_id || r.track_id;
+    let e = events[key];
+    const coal = !!r.target_coalition, tc = r.target_country || 'US';
+    if (!e) {
+      const card = document.createElement('div'); card.className = 'ev ' + (coal ? 'coal' : 'us');
+      e = events[key] = { card, live: true, members: 0, outcomes: {}, coal };
+      // was this one of ours? (the newest staged card without a match, same kind)
+      const kindOk = s => ['ship-attack', 'site-active'].includes(s.body.scenario) || (s.body.scenario === 'uas') === (r.kind === 'uas');
+      const mine = staged.find(s => !s.card.dataset.matched && Date.now() - s.at < 30000 && kindOk(s));
+      if (mine) { mine.card.dataset.matched = '1'; mine.card.remove(); }
+      const log = $('log'); if (log.firstChild && log.firstChild.className === 'empty') log.innerHTML = '';
+      log.prepend(card);
+    }
+    e.members += 1;
+    e.r = r;
+    render(e);
+    countFlight();
+  }
+  function onOutcome(r, ev) {
+    const e = events[r.wave_id || r.track_id]; if (!e) return;
+    if (ev === 'terminal') { e.terminal = true; render(e); return; }
+    e.outcomes[r.track_id] = ev;
+    const done = Object.keys(e.outcomes).length >= e.members;
+    if (done) { e.live = false; e.card.classList.add('done'); }
+    if (ev === 'intercepted') k('kill', +$('k-kill').textContent + 1); else k('impact', +$('k-impact').textContent + 1);
+    render(e); countFlight();
+  }
+  function render(e) {
+    const r = e.r, coal = e.coal, tc = r.target_country || 'US', host = r.target_host;
+    const kills = Object.values(e.outcomes).filter(v => v === 'intercepted').length, hits = Object.values(e.outcomes).filter(v => v === 'impact').length;
+    const what = (r.kind === 'uas' ? 'DRONE WAVE ×' + (r.wave_size || e.members) : (r.weapon_class || 'MISSILE') + ' ' + r.weapon);
+    const st = !e.live ? (hits ? '<span class="st impact">■ ENDED · ' + kills + ' intercepted · ' + hits + ' impact' + (hits > 1 ? 's' : '') + '</span>' : '<span class="st kill">✓ ALL INTERCEPTED (' + kills + ')</span>')
+                       : '<span class="st inflight">● IN FLIGHT · TTI ' + (r.tti_s != null ? Math.round(r.tti_s) + ' s at launch' : '—') + (e.terminal ? ' · TERMINAL' : '') + (kills || hits ? ' · ' + kills + ' killed, ' + hits + ' through' : '') + '</span>';
+    e.card.innerHTML = '<div class="h"><span class="aff ' + (coal ? 'coal' : 'us') + '">' + (coal ? 'COALITION' : 'US') + '</span>' + what + ' → ' + flag(tc) + ' ' + (r.target_name || r.target_id) + '</div>'
+      + '<div class="t">' + new Date(r.launched_at || Date.now()).toISOString().slice(11, 19) + 'Z · ' + (r.wave_id || r.track_id) + '</div>'
+      + '<div class="d">from ' + flag(r.country) + ' <b>' + r.launch_site + '</b> · ' + Math.round(r.range_nm || 0) + ' nm' + (host && host !== tc && CC[host] !== tc ? ' · host nation ' + flag(CC[host] || host) : '') + ' · defended by ' + (r.defended_by || '—') + '</div>' + st;
+  }
+  setInterval(() => { $('clock').textContent = new Date().toISOString().slice(11, 19); }, 1000);
+  fillTargets(); describe();
+</script>
+</body>
+</html>

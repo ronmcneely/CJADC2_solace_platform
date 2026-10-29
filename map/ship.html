@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ship 1MC Panel</title>
+<script src="vendor/mqtt.min.js"></script>
+<style>
+  /* The ship's side of the ship-defense workflow: the Officer of the Deck and Damage Control
+     Central see the threat geometry the agent computed and sound the 1MC. Every alarm and
+     announcement is an operator action on cop/c2/action, so it is audited and fused like any
+     other decision. Browser-only: MQTT over WebSocket, Web Audio for the alarms, speech synthesis
+     for the announcements. */
+  :root { --bg:#060a10; --panel:#0b121c; --panel2:#0f1826; --line:#1b2a3d; --ink:#e6edf7; --ink2:#9fb0c8; --ink3:#5f7190;
+          --crit:#e63950; --high:#ff9f1c; --good:#21c77a; --blue:#4c9be8; --cyan:#00d4ff; }
+  * { box-sizing:border-box; }
+  html, body { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:13px/1.35 "Cascadia Mono", Consolas, "Courier New", monospace; overflow:hidden;
+         background-image: radial-gradient(circle at 50% 120%, #0b1a2c 0, transparent 60%); }
+  .hdr { height:58px; display:flex; align-items:center; gap:18px; padding:0 16px; background:linear-gradient(180deg,#0e1726,#0a111c); border-bottom:1px solid var(--line); }
+  .hdr .title { font-size:16px; font-weight:bold; letter-spacing:3px; white-space:nowrap; } .hdr .title small { display:block; font-size:9px; letter-spacing:2px; color:var(--ink3); font-weight:normal; }
+  .hdr .nav { font-size:11px; color:var(--ink2); letter-spacing:1px; } .hdr .nav b { color:var(--ink); }
+  .hdr .z { margin-left:auto; text-align:right; font-size:19px; letter-spacing:2px; } .hdr .z small { display:block; font-size:9px; color:var(--ink3); letter-spacing:2px; }
+  .pill { font-size:10px; letter-spacing:1.5px; padding:4px 9px; border:1px solid var(--line); border-radius:3px; color:var(--ink2); }
+  .pill i { font-style:normal; display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--ink3); margin-right:6px; vertical-align:middle; }
+  .pill.up i { background:var(--good); box-shadow:0 0 6px var(--good); } .pill.down i { background:var(--crit); }
+  .cond { font-size:12px; font-weight:bold; letter-spacing:2px; padding:5px 12px; border:1px solid var(--line); border-radius:3px; }
+  .cond.gq { color:var(--crit); border-color:var(--crit); box-shadow:0 0 10px rgba(230,57,80,.5); animation: blink 1s infinite; }
+  @keyframes blink { 50% { opacity:.55; } }
+  .wrap { height:calc(100vh - 58px); display:grid; grid-template-columns: 1fr 1.25fr 1fr; grid-template-rows: 1fr 190px; gap:10px; padding:10px 12px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:4px; display:flex; flex-direction:column; min-height:0; }
+  .panel h2 { margin:0; padding:8px 12px; font-size:10px; letter-spacing:2px; color:var(--ink2); border-bottom:1px solid var(--line); display:flex; justify-content:space-between; }
+  .body { padding:8px 12px; overflow:auto; flex:1; }
+  .log { grid-column: 1 / -1; }
+  .contact { border:1px solid var(--line); border-left:3px solid var(--high); border-radius:3px; padding:7px 9px; margin-bottom:7px; background:var(--panel2); }
+  .contact.crit { border-left-color:var(--crit); } .contact.done { border-left-color:var(--ink3); opacity:.7; }
+  .contact .n { font-weight:bold; } .contact .d { color:var(--ink2); font-size:11px; margin-top:2px; }
+  .contact .g { display:grid; grid-template-columns: repeat(4, 1fr); gap:4px; margin-top:6px; }
+  .contact .g div { background:#0a1220; padding:4px 6px; border-radius:3px; } .contact .g small { display:block; font-size:8px; letter-spacing:1px; color:var(--ink3); }
+  .contact .g b { font-size:15px; } .contact .g b.red { color:var(--crit); } .contact .g b.cyan { color:var(--cyan); }
+  .btns { display:grid; grid-template-columns: 1fr 1fr; gap:8px; }
+  .btn { border:1px solid; border-radius:4px; background:transparent; color:var(--ink); font-family:inherit; cursor:pointer; padding:12px 10px; text-align:left; }
+  .btn b { display:block; font-size:12px; letter-spacing:1.5px; } .btn span { display:block; font-size:10px; color:var(--ink2); margin-top:3px; line-height:1.3; }
+  .btn.red { border-color:var(--crit); } .btn.red b { color:var(--crit); } .btn.red:hover { background:rgba(230,57,80,.12); }
+  .btn.orange { border-color:var(--high); } .btn.orange b { color:var(--high); } .btn.orange:hover { background:rgba(255,159,28,.12); }
+  .btn.blue { border-color:var(--cyan); } .btn.blue b { color:var(--cyan); } .btn.blue:hover { background:rgba(0,212,255,.1); }
+  .btn.green { border-color:var(--good); } .btn.green b { color:var(--good); } .btn.green:hover { background:rgba(33,199,122,.1); }
+  .btn.wide { grid-column: 1 / -1; }
+  .btn:disabled { opacity:.5; cursor:default; }
+  .hint { color:var(--ink3); font-size:10px; margin:8px 0 0; line-height:1.4; }
+  .note { border:1px solid var(--cyan); border-radius:3px; padding:8px 10px; margin-bottom:8px; background:rgba(0,212,255,.05); }
+  .note .who { font-size:9px; letter-spacing:1.5px; color:var(--cyan); } .note .s { font-weight:bold; margin:2px 0; } .note .m { color:var(--ink2); font-size:11px; }
+  .note .rec { margin-top:6px; padding:6px 8px; background:#0a1220; border-radius:3px; font-size:11px; } .note .rec small { display:block; color:var(--ink3); font-size:8px; letter-spacing:1px; }
+  .note .acts { margin-top:6px; display:flex; gap:6px; flex-wrap:wrap; }
+  .note .acts button { font-family:inherit; font-size:10px; letter-spacing:1px; padding:4px 8px; border-radius:3px; border:1px solid var(--cyan); background:transparent; color:var(--cyan); cursor:pointer; }
+  .note .acts button:hover { background:rgba(0,212,255,.12); }
+  .logrow { display:grid; grid-template-columns: 70px 120px 1fr 110px; gap:8px; padding:4px 0; border-bottom:1px solid rgba(255,255,255,.05); font-size:11px; }
+  .logrow .k { color:var(--crit); font-weight:bold; letter-spacing:1px; } .logrow .k.ann { color:var(--cyan); } .logrow .k.sec { color:var(--good); }
+  .logrow .t { color:var(--ink3); } .logrow .by { color:var(--ink2); text-align:right; }
+  .audio { font-size:10px; color:var(--ink2); } .audio label { cursor:pointer; }
+  .empty { color:var(--ink3); font-size:11px; padding:6px 0; }
+</style>
+</head>
+<body>
+<div class="hdr">
+  <div class="title">⚓ 1MC · <span id="hull">—</span><small id="shipname">SHIP'S GENERAL ANNOUNCING SYSTEM · OOD / DAMAGE CONTROL CENTRAL</small></div>
+  <div class="nav" id="nav">POS — · HDG — · SPD —</div>
+  <div class="cond" id="cond">CONDITION III · NORMAL UNDERWAY WATCH</div>
+  <span class="pill" id="conn"><i></i>MESH</span>
+  <span class="audio"><label><input type="checkbox" id="audio" checked> alarms + voice</label></span>
+  <div class="z"><span id="clock">--:--:--</span><small>SHIP'S TIME</small></div>
+</div>
+<div class="wrap">
+  <div class="panel"><h2><span>THREATS TO THIS SHIP</span><span id="thr-n">0</span></h2><div class="body" id="threats"><div class="empty">No contacts closing. Threat geometry is computed here from the live tracks on the mesh.</div></div></div>
+  <div class="panel"><h2><span>1MC · ALARMS AND ANNOUNCEMENTS</span><span>OOD AUTHORITY</span></h2><div class="body">
+    <div class="btns">
+      <button class="btn red" onclick="sound('1mc_gq')"><b>⚠ GENERAL QUARTERS</b><span>GQ alarm (bong-bong-bong) · "General Quarters, General Quarters, all hands man your battle stations"</span></button>
+      <button class="btn orange" onclick="sound('1mc_collision')"><b>⚠ COLLISION ALARM</b><span>Collision alarm · "Collision, collision, brace for impact"</span></button>
+      <button class="btn red wide" onclick="sound('1mc_brace')"><b>INBOUND THREAT — BRACE FOR SHOCK</b><span>Seconds to impact. GQ alarm + "Inbound threat, inbound threat! All hands brace for shock!" Everyone down, hold on.</span></button>
+      <button class="btn blue wide" onclick="sound('1mc_battle_stations')"><b>BATTLE STATIONS · BEARING AND RANGE</b><span id="bs-text">Minutes away. GQ alarm + "General Quarters, General Quarters! All hands man your battle stations for an inbound contact, bearing —, — miles closing."</span></button>
+      <button class="btn orange" onclick="sound('1mc_ciws')"><b>CIWS MOUNT WARNING</b><span>"CIWS, CIWS, mount 2-1 is tracking. Stand clear of mount 2-1!"</span></button>
+      <button class="btn green" onclick="sound('1mc_secure')"><b>SECURE FROM GQ</b><span>"Secure from General Quarters. Set the normal underway watch."</span></button>
+    </div>
+    <div class="hint">Each button publishes an operator action on <code>cop/c2/action/v1/{aor}/ship/<span id="hull2">hull</span>/…</code>. The fusion service writes the decision record, the audit queue keeps it, the SOAR files it. The bearing-and-range words are filled from the closest threat on the board.</div>
+  </div></div>
+  <div class="panel"><h2><span>WATCH NOTIFICATIONS · SHIP DEFENSE AGENT</span><span id="note-n">0</span></h2><div class="body" id="notes"><div class="empty">The ship-defense agent notifies the OOD and DCC here with the recommended alarm and the words to say, as soon as the mesh sees a threat to this ship.</div></div></div>
+  <div class="panel log"><h2><span>1MC LOG</span><span>this ship · all consoles</span></h2><div class="body" id="log"><div class="empty">Nothing passed on the 1MC yet.</div></div></div>
+</div>
+<script>
+  const q = new URLSearchParams(location.search);
+  const cfg = { broker: q.get('broker') || ('ws://' + location.hostname + ':8000'), username: q.get('username') || 'cop-viewer', password: q.get('password') || 'cop-demo', operator: q.get('operator') || 'ood' };
+  let HULL = (q.get('ship') || '').toUpperCase();
+  const $ = id => document.getElementById(id);
+  const own = { rec: null };                 // this ship's latest track
+  const ships = new Map();                   // all US ships seen (to pick a default)
+  const threats = new Map();                 // contact id -> {rec, ts, kind, done}
+  const notes = [];                          // agent notifications for this ship
+  const log = [];                            // 1MC actions (ours and other consoles')
+  let condition = 'NORMAL';
+
+  function nm(a, b, c, d) { const r = 3440.065, p1 = a * Math.PI / 180, p2 = c * Math.PI / 180, dp = (c - a) * Math.PI / 180, dl = (d - b) * Math.PI / 180; const x = Math.sin(dp / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) ** 2; return 2 * r * Math.asin(Math.sqrt(x)); }
+  function brg(a, b, c, d) { const p1 = a * Math.PI / 180, p2 = c * Math.PI / 180, dl = (d - b) * Math.PI / 180; const x = Math.sin(dl) * Math.cos(p2), y = Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl); return (Math.atan2(x, y) * 180 / Math.PI + 360) % 360; }
+  const spoken = b => String(Math.round(b) % 360).padStart(3, '0').split('').join('-');
+  const aorOf = (lat, lon) => lon >= 90 ? 'indopacom' : (lat < 17 && lon < 44.5) ? 'africom' : (lon < 33.5 || lat >= 36.5) ? 'eucom' : 'centcom';
+  const lvl = s => String(s || 'unknown').toLowerCase().replace(/[\/*> ]/g, '-');
+
+  // ---- geometry for the board: everything aimed at us or inside 30 nm
+  function geometry(c) {
+    const s = own.rec; if (!s || c.lat == null) return null;
+    const bt = brg(s.lat, s.lon, c.lat, c.lon), hdg = +(s.heading_deg || 0), br = (bt - hdg + 360) % 360, rng = nm(s.lat, s.lon, c.lat, c.lon);
+    const spd = +(c.speed_kts || c.speed_knots || 0), chd = +(c.heading_deg || 0), toShip = brg(c.lat, c.lon, s.lat, s.lon);
+    const closing = spd * Math.cos((chd - toShip) * Math.PI / 180);
+    const tti = c.tti_s != null ? c.tti_s : (closing > 5 ? rng / closing * 3600 : null);
+    return { bt, br, rng, closing, tti };
+  }
+  function closest() {
+    let best = null;
+    for (const v of threats.values()) { if (v.done) continue; const g = geometry(v.rec); if (!g) continue; if (!best || g.rng < best.g.rng) best = { v, g }; }
+    return best;
+  }
+
+  // ---- the 1MC
+  const ALARMS = {
+    '1mc_gq':              { kind: 'alarm', label: 'GENERAL QUARTERS', alarm: 'gq', text: 'General Quarters, General Quarters! All hands man your battle stations.', cond: 'GQ' },
+    '1mc_collision':       { kind: 'alarm', label: 'COLLISION ALARM', alarm: 'collision', text: 'Collision, collision! All hands brace for impact.', cond: 'GQ' },
+    '1mc_brace':           { kind: 'announcement', label: 'BRACE FOR SHOCK', alarm: 'gq', text: 'Inbound threat, inbound threat! All hands brace for shock!', cond: 'GQ' },
+    '1mc_battle_stations': { kind: 'announcement', label: 'BATTLE STATIONS', alarm: 'gq', text: null, cond: 'GQ' },
+    '1mc_ciws':            { kind: 'announcement', label: 'CIWS WARNING', alarm: null, text: 'C I W S, C I W S, mount two one is tracking. Stand clear of mount two one!', cond: null },
+    '1mc_secure':          { kind: 'announcement', label: 'SECURE FROM GQ', alarm: null, text: 'Secure from General Quarters. Set the normal underway watch.', cond: 'NORMAL' },
+  };
+  function battleStationsText() {
+    const b = closest();
+    if (!b) return 'General Quarters, General Quarters! All hands man your battle stations for an inbound contact.';
+    const kind = b.v.kind === 'missile' ? 'an inbound missile' : b.v.kind === 'uas' ? 'an inbound air contact, one-way-attack UAS' : b.v.kind === 'aircraft' ? 'an inbound air contact' : 'an inbound surface contact';
+    return `General Quarters, General Quarters! All hands man your battle stations for ${kind}, bearing ${spoken(b.g.br)}, ${Math.max(1, Math.round(b.g.rng))} miles closing.`;
+  }
+  async function sound(id, textOverride) {
+    const a = ALARMS[id]; if (!a) return;
+    const text = textOverride || a.text || battleStationsText();
+    const b = closest(); const s = own.rec || {};
+    if (a.alarm) playAlarm(a.alarm);
+    if (text) speak(text, a.alarm ? (a.alarm === 'gq' ? 4500 : 3500) : 0);
+    if (a.cond) setCondition(a.cond);
+    try {
+      await publish(id, { message: `${a.label}: "${text}"`, announcement: text, alarm: a.alarm, kind: a.kind, condition: a.cond || condition,
+        contact: b ? b.v.rec.track_id || b.v.rec.aircraft_id || b.v.rec.vessel_id : null, bearing_relative_deg: b ? Math.round(b.g.br) : null, range_nm: b ? +b.g.rng.toFixed(1) : null,
+        notification_id: (notes[0] || {}).notification_id || null });
+      addLog({ when: Date.now(), kind: a.kind, label: a.label, text, by: cfg.operator + ' (this console)' });
+    } catch (e) { addLog({ when: Date.now(), kind: 'error', label: 'PUBLISH FAILED', text: e.message, by: '' }); }
+  }
+  function publish(action, extra) {
+    const s = own.rec || { lat: 25, lon: 55 };
+    const topic = `cop/c2/action/v1/${aorOf(s.lat, s.lon)}/ship/${lvl(HULL)}/${lvl(action)}`;
+    const body = Object.assign({ action, domain: 'SHIP', operator: cfg.operator, target_id: HULL, ship_name: s.vessel_type, details: { message: extra.message }, lat: s.lat, lon: s.lon, timestamp: Date.now() }, extra);
+    return new Promise((res, rej) => { if (!client.connected) return rej(new Error('not connected to the mesh')); client.publish(topic, JSON.stringify(body), { qos: 1 }, e => e ? rej(e) : res(topic)); });
+  }
+  function setCondition(c) {
+    condition = c; const el = $('cond');
+    el.textContent = c === 'GQ' ? 'GENERAL QUARTERS · CONDITION I · BATTLE STATIONS MANNED' : 'CONDITION III · NORMAL UNDERWAY WATCH';
+    el.classList.toggle('gq', c === 'GQ');
+  }
+
+  // ---- audio: the alarms are synthesized (no audio files in the repo); the words come from the browser's voice
+  let actx = null;
+  function ctx() { if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)(); if (actx.state === 'suspended') actx.resume(); return actx; }
+  function bong(t0, freq, dur, gain) {
+    const c = ctx(), o = c.createOscillator(), g = c.createGain();
+    o.type = 'sine'; o.frequency.setValueAtTime(freq, t0);
+    g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(gain, t0 + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    o.connect(g).connect(c.destination); o.start(t0); o.stop(t0 + dur + 0.05);
+  }
+  function playAlarm(kind) {
+    if (!$('audio').checked) return;
+    const c = ctx(), t = c.currentTime;
+    if (kind === 'gq') { for (let i = 0; i < 6; i++) bong(t + i * 0.7, 520, 0.6, 0.5); }          // the rhythmic bong-bong-bong of the GQ alarm
+    else if (kind === 'collision') { for (let i = 0; i < 14; i++) bong(t + i * 0.22, i % 2 ? 660 : 880, 0.2, 0.45); }   // the rapid warble of the collision alarm
+  }
+  function speak(text, delayMs) {
+    if (!$('audio').checked || !window.speechSynthesis) return;
+    setTimeout(() => { const u = new SpeechSynthesisUtterance(text); u.rate = 0.95; u.pitch = 0.9; u.volume = 1; speechSynthesis.cancel(); speechSynthesis.speak(u); }, delayMs || 0);
+  }
+
+  // ---- rendering
+  function renderThreats() {
+    const now = Date.now();
+    for (const [k, v] of threats) if (now - v.ts > (v.done ? 60000 : 25000)) threats.delete(k);
+    const rows = [...threats.values()].map(v => ({ v, g: geometry(v.rec) })).filter(x => x.g).sort((a, b) => a.g.rng - b.g.rng);
+    $('thr-n').textContent = rows.filter(x => !x.v.done).length;
+    $('threats').innerHTML = rows.length ? rows.map(({ v, g }) => {
+      const r = v.rec, crit = (g.tti != null && g.tti < 60) || g.rng < 5;
+      const name = r.weapon ? `${r.weapon} ${r.weapon_class || ''} ${r.track_id}` : r.aircraft_type ? `${r.country || ''} ${r.aircraft_type} ${r.aircraft_id}` : `${r.country || ''} ${r.vessel_type || ''} ${r.vessel_id || ''}`;
+      const stage = v.done ? v.done : g.tti != null && g.tti < 60 ? 'IMMEDIATE · BRACE' : g.rng < 1.5 ? 'CLOSE-IN · CIWS' : 'TACTICAL · GQ';
+      return `<div class="contact ${v.done ? 'done' : crit ? 'crit' : ''}"><div class="n">${name}</div><div class="d">${v.done ? v.done : stage} · ${r.phase || r.status || ''}${r.engaged_by ? ' · engaged by ' + r.engaged_by : ''}</div>
+        <div class="g"><div><small>REL BRG</small><b class="cyan">${spoken(g.br)}</b></div><div><small>TRUE</small><b>${String(Math.round(g.bt)).padStart(3, '0')}°</b></div><div><small>RANGE</small><b class="${crit ? 'red' : ''}">${g.rng.toFixed(g.rng < 10 ? 1 : 0)} nm</b></div><div><small>TTI</small><b class="${crit ? 'red' : ''}">${g.tti != null ? Math.round(g.tti) + ' s' : '—'}</b></div></div></div>`;
+    }).join('') : '<div class="empty">No contacts closing. Threat geometry is computed here from the live tracks on the mesh.</div>';
+    const b = closest(); $('bs-text').textContent = b ? `Minutes away. GQ alarm + "${battleStationsText()}"` : 'Minutes away. GQ alarm + "General Quarters, General Quarters! All hands man your battle stations for an inbound contact, bearing —, — miles closing."';
+  }
+  function renderNotes() {
+    $('note-n').textContent = notes.length;
+    $('notes').innerHTML = notes.length ? notes.slice(0, 12).map(n => {
+      const opts = (n.options || []).map(o => `<button onclick="useOption('${o.id}', this)" data-text="${(o.announcement || '').replace(/"/g, '&quot;')}">${o.label}</button>`).join('');
+      return `<div class="note"><div class="who">${String(n.agent || 'agent').toUpperCase()} · ${n.priority || ''} · ${new Date(n.timestamp || Date.now()).toLocaleTimeString()}</div><div class="s">${n.subject || ''}</div><div class="m">${n.message || ''}</div>
+        <div class="rec"><small>RECOMMENDED · ${String(n.recommended_alarm || '').replace('_', ' ').toUpperCase()}${n.bearing_spoken ? ' · brg ' + n.bearing_spoken + ' · ' + Math.round(n.range_nm || 0) + ' nm' : ''}</small>${n.recommended_announcement || ''}</div>
+        <div class="acts">${opts}</div></div>`;
+    }).join('') : '<div class="empty">The ship-defense agent notifies the OOD and DCC here with the recommended alarm and the words to say, as soon as the mesh sees a threat to this ship.</div>';
+  }
+  function useOption(id, btn) { sound(id, btn.dataset.text || null); }
+  function addLog(e) { log.unshift(e); log.sort((a, b) => b.when - a.when); if (log.length > 60) log.pop(); renderLog(); }
+  function renderLog() {
+    $('log').innerHTML = log.length ? log.map(e => `<div class="logrow"><span class="t">${new Date(e.when).toLocaleTimeString()}</span><span class="k ${e.kind === 'announcement' ? 'ann' : ''} ${e.label === 'SECURE FROM GQ' ? 'sec' : ''}">${e.label}</span><span>${e.text}</span><span class="by">${e.by}</span></div>`).join('') : '<div class="empty">Nothing passed on the 1MC yet.</div>';
+  }
+  function renderNav() {
+    const s = own.rec; if (!s) return;
+    $('nav').innerHTML = `POS <b>${(+s.lat).toFixed(3)}, ${(+s.lon).toFixed(3)}</b> · HDG <b>${String(Math.round(s.heading_deg || 0)).padStart(3, '0')}°</b> · SPD <b>${Math.round(s.speed_knots || s.speed_kts || 0)} kts</b> · ${s.status || ''}`;
+    $('shipname').textContent = (s.vessel_type || '') + " · SHIP'S GENERAL ANNOUNCING SYSTEM · OOD / DAMAGE CONTROL CENTRAL";
+  }
+  function setHull(h) { HULL = h; $('hull').textContent = h; $('hull2').textContent = lvl(h); document.title = '1MC · ' + h; }
+
+  // ---- the mesh
+  const client = mqtt.connect(cfg.broker, { username: cfg.username, password: cfg.password, clientId: '1mc-' + (HULL || 'ship') + '-' + Math.random().toString(16).slice(2, 6), keepalive: 30, reconnectPeriod: 2000, protocolVersion: 4, clean: true });
+  client.on('connect', () => { $('conn').className = 'pill up'; ['cop/sea/track/#', 'cop/air/track/#', 'cop/air/missile/#', 'cop/air/uas/#', 'cop/air/missile-event/#', 'cop/air/uas-event/#', 'cop/notify/#', 'cop/c2/action/#', 'cop/alert/ship-threat/#'].forEach(t => client.subscribe(t, { qos: 0 })); });
+  client.on('close', () => { $('conn').className = 'pill down'; });
+  client.on('message', (topic, payload) => {
+    let rec; try { rec = JSON.parse(payload.toString()); } catch (e) { return; }
+    const p = topic.split('/'); if (p.length < 8) return; const domain = p[1], event = p[2], now = Date.now();
+    if (domain === 'sea' && event === 'track') {
+      if (rec.country === 'US' && rec.vessel_id) { ships.set(rec.vessel_id, rec); if (!HULL) setHull(rec.vessel_id); }
+      if (rec.vessel_id === HULL) { own.rec = rec; renderNav(); }
+      else if (p[5] === 'hostile' && own.rec && nm(own.rec.lat, own.rec.lon, rec.lat, rec.lon) < 30) threats.set(rec.vessel_id, { rec, ts: now, kind: 'surface' });
+    } else if (domain === 'air' && event === 'track') {
+      if (p[5] === 'hostile' && own.rec && nm(own.rec.lat, own.rec.lon, rec.lat, rec.lon) < 30) threats.set(rec.aircraft_id, { rec, ts: now, kind: 'aircraft' });
+    } else if (domain === 'air' && (event === 'missile' || event === 'uas')) {
+      if (rec.target_id === HULL && !(threats.get(rec.track_id) || {}).done) threats.set(rec.track_id, { rec, ts: now, kind: event });
+    } else if (domain === 'air' && (event === 'missile-event' || event === 'uas-event')) {
+      if (rec.target_id === HULL && (rec.event === 'intercepted' || rec.event === 'impact')) threats.set(rec.track_id, { rec, ts: now, kind: event.split('-')[0], done: rec.event.toUpperCase() });
+    } else if (domain === 'notify' && event === 'ship' && (!HULL || p[5] === lvl(HULL))) {
+      notes.unshift(rec); if (notes.length > 20) notes.pop(); renderNotes();
+      if ($('audio').checked) { bong(ctx().currentTime, 1200, 0.15, 0.3); bong(ctx().currentTime + 0.2, 1500, 0.15, 0.3); }
+    } else if (domain === 'c2' && event === 'action' && p[5] === 'ship' && p[6] === lvl(HULL)) {
+      if (rec.operator === cfg.operator && rec.timestamp && Date.now() - rec.timestamp < 3000) return;    // our own, already logged
+      addLog({ when: rec.timestamp || now, kind: rec.kind || 'announcement', label: (ALARMS[rec.action] || {}).label || rec.action, text: rec.announcement || (rec.details || {}).message || '', by: rec.operator || '?' });
+      if (rec.condition) setCondition(rec.condition);
+    }
+  });
+  if (HULL) setHull(HULL);
+  setInterval(renderThreats, 1000);
+  setInterval(() => $('clock').textContent = new Date().toLocaleTimeString(), 1000);
+</script>
+</body>
+</html>

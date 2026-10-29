@@ -1,0 +1,145 @@
+# Shared by every Agent Mesh component in this project: the broker (the same CONUS
+# PubSub+ broker the sensors and the COP use, Message VPN "cop") and the LLM.
+#
+# The LLM is local by default (Ollama, air-gapped); point LLM_SERVICE_* in .env at a
+# cloud model to trade the air gap for speed. The model string is LiteLLM's
+# "<provider>/<model>" form; ollama_chat/ is the Ollama provider with tool calling.
+shared_config:
+  - broker_connection: &broker_connection
+      dev_mode: ${SOLACE_DEV_MODE, false}
+      broker_url: ${SOLACE_BROKER_URL, ws://conus:8008}
+      broker_username: ${SOLACE_BROKER_USERNAME, agent-mesh}
+      broker_password: ${SOLACE_BROKER_PASSWORD, cop-demo}
+      broker_vpn: ${SOLACE_BROKER_VPN, cop}
+      temporary_queue: ${USE_TEMPORARY_QUEUES, true}
+
+  - models:
+    general: &general_model
+      model: ${LLM_SERVICE_GENERAL_MODEL_NAME, ollama_chat/qwen2.5:3b}
+      api_base: ${LLM_SERVICE_ENDPOINT, http://ollama:11434}
+      api_key: ${LLM_SERVICE_API_KEY, none}
+      # Ollama on a CPU: keep the context small and the answer short
+      num_ctx: 8192
+      num_thread: 6             # not all 10 vCPUs: on a hybrid CPU every token waits for the slowest thread, and the map/feeds keep some cores busy during a wave
+      max_tokens: 300
+      temperature: 0.1
+      timeout: 300              # queued behind another agent's call on a CPU is not an error
+      num_retries: 0            # a timed-out request must not be re-queued three more times
+    planning: &planning_model
+      model: ${LLM_SERVICE_PLANNING_MODEL_NAME, ollama_chat/qwen2.5:3b}
+      api_base: ${LLM_SERVICE_ENDPOINT, http://ollama:11434}
+      api_key: ${LLM_SERVICE_API_KEY, none}
+      num_ctx: 8192
+      max_tokens: 800
+      temperature: 0.1
+      timeout: 300
+      num_retries: 0
+
+  - services:
+    session_service: &default_session_service
+      type: "memory"
+      default_behavior: "RUN_BASED"          # every event is its own task; nothing carries over
+    artifact_service: &default_artifact_service
+      type: "memory"
+      artifact_scope: namespace
+    data_tools_config: &default_data_tools_config
+      sqlite_memory_threshold_mb: 50
+      max_result_preview_rows: 20
+      max_result_preview_bytes: 2048
+    auto_summarization: &default_auto_summarization
+      compaction_percentage: 0.25
+
+  # The COP tools every agent can be given (see src/cop_tools). Listed once here so the
+  # agent files stay readable; each agent picks the subset it needs.
+  - cop_tools:
+    get_inbound_threat: &tool_get_inbound_threat
+      tool_type: python
+      component_module: cop_tools
+      component_base_path: src
+      init_function: init_mesh
+      function_name: get_inbound_threat
+    recommend_engagement: &tool_recommend_engagement
+      tool_type: python
+      component_module: cop_tools
+      component_base_path: src
+      function_name: recommend_engagement
+    notify_host_nation: &tool_notify_host_nation
+      tool_type: python
+      component_module: cop_tools
+      component_base_path: src
+      function_name: notify_host_nation
+    notify_airspace_and_maritime: &tool_notify_airspace
+      tool_type: python
+      component_module: cop_tools
+      component_base_path: src
+      function_name: notify_airspace_and_maritime
+    get_ship_threat_geometry: &tool_ship_geometry
+      tool_type: python
+      component_module: cop_tools
+      component_base_path: src
+      init_function: init_mesh
+      function_name: get_ship_threat_geometry
+    notify_ship_watch: &tool_notify_ship_watch
+      tool_type: python
+      component_module: cop_tools
+      component_base_path: src
+      function_name: notify_ship_watch
+    get_launch_site_history: &tool_launch_site_history
+      tool_type: python
+      component_module: cop_tools
+      component_base_path: src
+      init_function: init_mesh
+      function_name: get_launch_site_history
+    request_isr: &tool_request_isr
+      tool_type: python
+      component_module: cop_tools
+      component_base_path: src
+      function_name: request_isr
+    nominate_target: &tool_nominate_target
+      tool_type: python
+      component_module: cop_tools
+      component_base_path: src
+      function_name: nominate_target
+    # one-call workflows: what the event-driven agents actually use (a local model makes one tool call reliably)
+    handle_launch: &tool_handle_launch
+      tool_type: python
+      component_module: cop_tools
+      component_base_path: src
+      init_function: init_mesh
+      function_name: handle_launch
+    handle_ship_threat: &tool_handle_ship_threat
+      tool_type: python
+      component_module: cop_tools
+      component_base_path: src
+      init_function: init_mesh
+      function_name: handle_ship_threat
+    handle_launch_site: &tool_handle_launch_site
+      tool_type: python
+      component_module: cop_tools
+      component_base_path: src
+      init_function: init_mesh
+      function_name: handle_launch_site
+    handle_impact: &tool_handle_impact
+      tool_type: python
+      component_module: cop_tools
+      component_base_path: src
+      init_function: init_mesh
+      function_name: handle_impact
+    handle_coalition_attack: &tool_handle_coalition_attack
+      tool_type: python
+      component_module: cop_tools
+      component_base_path: src
+      init_function: init_mesh
+      function_name: handle_coalition_attack
+    notify_partner_engagement: &tool_notify_partner_engagement
+      tool_type: python
+      component_module: cop_tools
+      component_base_path: src
+      init_function: init_mesh
+      function_name: notify_partner_engagement
+    get_threat_picture: &tool_get_threat_picture
+      tool_type: python
+      component_module: cop_tools
+      component_base_path: src
+      init_function: init_mesh
+      function_name: get_threat_picture

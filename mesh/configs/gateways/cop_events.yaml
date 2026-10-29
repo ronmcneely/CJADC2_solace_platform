@@ -1,0 +1,171 @@
+# Event Mesh Gateway: the bridge from the COP's sensor topics to the agents.
+#
+# Nothing polls. The gateway holds subscriptions on the same broker the sensors publish to;
+# a launch event becomes an A2A task for the IAMD agent the moment it is published, a
+# ship-threat alert becomes a task for the ship-defense agent, an impact or a busy launch
+# site becomes a task for the targeting agent. The agent's reply is published back to the
+# mesh on cop/agent/report/… where the COP, the audit queue and the SOAR pick it up.
+#
+# Data plane and control plane are the same broker here (Message VPN "cop"); in a fielded
+# system they could be two brokers in the mesh, which is why the gateway takes a separate
+# event_mesh_broker_config.
+log:
+  stdout_log_level: INFO
+  log_file_level: INFO
+  log_file: cop_events_gateway.log
+
+!include ../shared_config.yaml
+
+apps:
+  - name: cop_events_gateway_app
+    app_base_path: .
+    app_module: sam_event_mesh_gateway.app
+    broker:
+      <<: *broker_connection
+
+    app_config:
+      namespace: ${NAMESPACE, solace-agent-mesh/}
+      gateway_id: "cop-events-gw"
+      artifact_service: *default_artifact_service
+      authorization_service:
+        type: "none"
+      default_user_identity: "cop-watch-floor"
+
+      event_mesh_broker_config:
+        broker_url: ${SOLACE_BROKER_URL, ws://conus:8008}
+        broker_vpn: ${SOLACE_BROKER_VPN, cop}
+        broker_username: ${SOLACE_BROKER_USERNAME, agent-mesh}
+        broker_password: ${SOLACE_BROKER_PASSWORD, cop-demo}
+
+      event_handlers:
+        # A launch at a US asset -> IAMD agent. The alerting service publishes one routing alert per launch,
+        # cop/alert/inbound/v1/{aor}/{sev}/{track}/{us|coalition}: the last topic level decides which workflow runs.
+        - name: "us_inbound_to_iamd"
+          subscriptions:
+            - topic: "cop/alert/inbound/v1/*/*/*/us"
+              qos: 1
+          payload_encoding: "utf-8"
+          payload_format: "json"
+          input_expression: "template:LAUNCH DETECTED at a US asset. Inbound track_id {{text://input.payload:entity}}: {{text://input.payload:weapon}} ({{text://input.payload:weapon_class}}) from {{text://input.payload:launch_site}} aimed at {{text://input.payload:target_name}} (target_id {{text://input.payload:target}}), time to impact {{text://input.payload:tti_s}} s. Handle it now."
+          user_identity_expression: "static:cop-watch-floor"
+          default_user_identity: "cop-watch-floor"
+          target_agent_name: "IamdAgent"
+          on_success: "agent_report"
+          on_error: "agent_error"
+          forward_context:
+            agent: "static:iamd"
+            aor: "input.topic_levels:4"
+            target: "input.payload:entity"
+            source_topic: "input.topic:"
+
+        # A launch at a coalition partner's asset -> coalition liaison agent (notify partner, HITL engage)
+        - name: "coalition_inbound_to_liaison"
+          subscriptions:
+            - topic: "cop/alert/inbound/v1/*/*/*/coalition"
+              qos: 1
+          payload_encoding: "utf-8"
+          payload_format: "json"
+          input_expression: "template:ATTACK on a coalition partner asset. Inbound track_id {{text://input.payload:entity}}: {{text://input.payload:weapon}} ({{text://input.payload:weapon_class}}) from {{text://input.payload:launch_site}} aimed at {{text://input.payload:target_name}} (target_id {{text://input.payload:target}}, partner nation {{text://input.payload:target_country}}), time to impact {{text://input.payload:tti_s}} s. Notify the partner and put the engagement to the US operator now."
+          user_identity_expression: "static:cop-watch-floor"
+          default_user_identity: "cop-watch-floor"
+          target_agent_name: "CoalitionLiaisonAgent"
+          on_success: "agent_report"
+          on_error: "agent_error"
+          forward_context:
+            agent: "static:coalition-liaison"
+            aor: "input.topic_levels:4"
+            target: "input.payload:entity"
+            source_topic: "input.topic:"
+
+        # The US operator approved engaging on the partner's behalf -> second partner notification
+        - name: "coalition_engage_to_liaison"
+          subscriptions:
+            - topic: "cop/c2/action/v1/*/coalition/*/engage"
+              qos: 1
+            - topic: "cop/c2/action/v1/*/coalition/*/weapons_free"
+              qos: 1
+          payload_encoding: "utf-8"
+          payload_format: "json"
+          input_expression: "template:ENGAGEMENT APPROVED by US operator {{text://input.payload:operator}} on inbound track_id {{text://input.payload:target_id}} (coalition partner asset). Tell the partner US forces are engaging now."
+          user_identity_expression: "static:cop-watch-floor"
+          default_user_identity: "cop-watch-floor"
+          target_agent_name: "CoalitionLiaisonAgent"
+          on_success: "agent_report"
+          on_error: "agent_error"
+          forward_context:
+            agent: "static:coalition-liaison"
+            aor: "input.topic_levels:4"
+            target: "input.payload:target_id"
+            source_topic: "input.topic:"
+
+        # A threat to a ship -> ship self-defense agent (OOD / DCC, 1MC options)
+        - name: "ship_threat_to_ship_defense"
+          subscriptions:
+            - topic: "cop/alert/ship-threat/v1/>"
+              qos: 1
+          payload_encoding: "utf-8"
+          payload_format: "json"
+          input_expression: "template:SHIP THREAT. ship_id {{text://input.payload:ship_id}} ({{text://input.payload:ship_name}}), contact_id {{text://input.payload:contact_id}}: {{text://input.payload:message}}. Compute the geometry and notify the OOD and DCC with the 1MC options now."
+          user_identity_expression: "static:cop-watch-floor"
+          default_user_identity: "cop-watch-floor"
+          target_agent_name: "ShipDefenseAgent"
+          on_success: "agent_report"
+          on_error: "agent_error"
+          forward_context:
+            agent: "static:ship-defense"
+            aor: "input.topic_levels:4"
+            target: "input.payload:ship_id"
+            source_topic: "input.topic:"
+
+        # An impact -> BDA and target nomination
+        - name: "impact_to_targeting"
+          subscriptions:
+            - topic: "cop/air/missile-event/v1/*/hostile/*/impact"
+              qos: 1
+            - topic: "cop/air/uas-event/v1/*/hostile/*/impact"
+              qos: 1
+          payload_encoding: "utf-8"
+          payload_format: "json"
+          input_expression: "template:IMPACT. {{text://input.payload:weapon}} {{text://input.payload:track_id}} from launch site {{text://input.payload:launch_site_id}} ({{text://input.payload:launch_site}}) hit target_id {{text://input.payload:target_id}} ({{text://input.payload:target_name}}). Task BDA imagery on the target and nominate the launch site."
+          user_identity_expression: "static:cop-watch-floor"
+          default_user_identity: "cop-watch-floor"
+          target_agent_name: "TargetingAgent"
+          on_success: "agent_report"
+          on_error: "agent_error"
+          forward_context:
+            agent: "static:targeting"
+            aor: "input.topic_levels:4"
+            target: "input.payload:launch_site_id"
+            source_topic: "input.topic:"
+
+        # A launch site that keeps firing (alerting raises launch-site at the third launch) -> targeting
+        - name: "busy_site_to_targeting"
+          subscriptions:
+            - topic: "cop/alert/launch-site/v1/>"
+              qos: 1
+          payload_encoding: "utf-8"
+          payload_format: "json"
+          input_expression: "template:ACTIVE LAUNCH SITE. site_id {{text://input.payload:entity}}: {{text://input.payload:message}}. Review its history, task ISR to confirm the launcher, and nominate it."
+          user_identity_expression: "static:cop-watch-floor"
+          default_user_identity: "cop-watch-floor"
+          target_agent_name: "TargetingAgent"
+          on_success: "agent_report"
+          on_error: "agent_error"
+          forward_context:
+            agent: "static:targeting"
+            aor: "input.topic_levels:4"
+            target: "input.payload:entity"
+            source_topic: "input.topic:"
+
+      output_handlers:
+        - name: "agent_report"
+          max_file_size_for_base64_bytes: 1048576
+          topic_expression: "template:cop/agent/report/v1/{{text://user_data.forward_context:aor}}/{{text://user_data.forward_context:agent}}/{{text://user_data.forward_context:target}}/summary"
+          payload_expression: "template:{\"schema\":\"cop.agent.report.v1\",\"agent\":\"{{text://user_data.forward_context:agent}}\",\"target_id\":\"{{text://user_data.forward_context:target}}\",\"source_topic\":\"{{text://user_data.forward_context:source_topic}}\",\"summary\":{{json://task_response:text}}}"
+          payload_encoding: "utf-8"
+          payload_format: "text"
+        - name: "agent_error"
+          topic_expression: "template:cop/agent/report/v1/{{text://user_data.forward_context:aor}}/{{text://user_data.forward_context:agent}}/{{text://user_data.forward_context:target}}/error"
+          payload_expression: "template:{\"schema\":\"cop.agent.report.v1\",\"agent\":\"{{text://user_data.forward_context:agent}}\",\"target_id\":\"{{text://user_data.forward_context:target}}\",\"error\":{{json://task_response:text}}}"
+          payload_encoding: "utf-8"
+          payload_format: "text"

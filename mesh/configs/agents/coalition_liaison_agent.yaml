@@ -1,0 +1,77 @@
+# Coalition liaison agent: a missile or drone launched at a COALITION PARTNER's ship or base.
+# 1. The partner's national authority is told at once (attack inbound, what we see, US can engage for them).
+# 2. A US operator decides on the COP whether US forces engage on the partner's behalf.
+# 3. When they do, the partner is told who is engaging and with what; the standing watch tells them the outcome.
+log:
+  stdout_log_level: INFO
+  log_file_level: INFO
+  log_file: coalition_liaison_agent.log
+
+!include ../shared_config.yaml
+
+apps:
+  - name: coalition_liaison_agent_app
+    app_base_path: .
+    app_module: solace_agent_mesh.agent.sac.app
+    broker:
+      <<: *broker_connection
+
+    app_config:
+      namespace: ${NAMESPACE, solace-agent-mesh/}
+      supports_streaming: true
+      agent_name: "CoalitionLiaisonAgent"
+      display_name: "Coalition Liaison Agent"
+      model: *general_model
+
+      instruction: |
+        You are the coalition liaison agent on a joint common operating picture. You are invoked in two cases, and in each
+        you MUST call exactly one tool before writing anything:
+        (a) ATTACK: a hostile missile or drone has been launched at a coalition partner's ship or base. The partner's national
+            authority has already been notified automatically. Call handle_coalition_attack(track_id): it finds the US ships and
+            bases best placed to engage on the partner's behalf and puts that assessment on the coalition event board, where the
+            US watch officer chooses to engage from a US unit, stand by and monitor, record that the partner engaged, or end the
+            event. You never fire.
+        (b) ENGAGEMENT APPROVED: the US operator approved engaging on the partner's behalf. Call
+            notify_partner_engagement(track_id). It tells the partner which US unit is engaging and with what.
+        Do not claim anything the tool result does not say. Reply in at most three short lines of plain words, never JSON:
+        PARTNER: <country and authority> · THREAT: <weapon, target, time to impact> · US OPTIONS: <best placed US unit and weapon, or none in range> / US ENGAGING: <unit and interceptor>.
+
+      tools:
+        - *tool_handle_coalition_attack
+        - *tool_notify_partner_engagement
+        - *tool_get_inbound_threat
+
+      session_service: *default_session_service
+      artifact_service: *default_artifact_service
+      artifact_handling_mode: "ignore"
+      auto_inject_artifact_tools: false
+      enable_embed_resolution: false
+      enable_auto_continuation: false     # a reply cut at max_tokens is done; a second LLM call on a CPU is not worth the tail
+      enable_artifact_content_instruction: false
+      inject_system_purpose: false
+      inject_response_format: false
+      data_tools_config: *default_data_tools_config
+      auto_summarization: *default_auto_summarization
+
+      agent_card:
+        description: |
+          Coalition liaison. When a partner nation's ship or base is attacked it notifies that nation's joint operations
+          authority, puts a US engagement on their behalf to the US operator for approval, and tells the partner when US
+          forces engage and what the outcome was.
+        defaultInputModes: [text]
+        defaultOutputModes: [text]
+        skills:
+          - id: partner_notification
+            name: Partner notification
+            description: Attack, engagement and outcome notifications to the partner nation's national authority.
+          - id: engagement_on_behalf
+            name: Engagement on a partner's behalf
+            description: Recommends a US engagement of a threat to a coalition asset, for US operator approval.
+      agent_card_publishing:
+        interval_seconds: 10
+      agent_discovery:
+        enabled: true
+      inter_agent_communication:
+        allow_list: []
+        deny_list: []
+        request_timeout_seconds: 300

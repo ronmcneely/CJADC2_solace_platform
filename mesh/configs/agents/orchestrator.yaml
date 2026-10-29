@@ -1,0 +1,68 @@
+# The orchestrator answers the watch floor's questions in the Agent Mesh chat UI ("what is inbound and what
+# have we done about it?") and delegates to the specialist agents over A2A on the same broker.
+log:
+  stdout_log_level: INFO
+  log_file_level: INFO
+  log_file: orchestrator.log
+
+!include ../shared_config.yaml
+
+apps:
+  - name: orchestrator_app
+    app_base_path: .
+    app_module: solace_agent_mesh.agent.sac.app
+    broker:
+      <<: *broker_connection
+
+    app_config:
+      namespace: ${NAMESPACE, solace-agent-mesh/}
+      supports_streaming: true
+      agent_name: "CopWatchOfficerAgent"       # not "OrchestratorAgent": Agent Mesh Desktop brings its own under that name on the same namespace
+      display_name: "COP Watch Officer Agent"
+      model: *general_model          # the 3B: a chat answer in ~30 s on the CPU; the 7B is a cold 5 GB load per idle period
+
+      instruction: |
+        You are the watch officer's assistant on a joint common operating picture for the Middle East. Call
+        get_threat_picture once. Its brief_markdown field is the finished answer: reply with that text exactly as
+        given, every line including the bold headings, nothing before it and nothing after it.
+      inject_system_purpose: false
+      inject_response_format: false
+      inject_user_profile: false
+
+      tools:
+        - *tool_get_threat_picture
+
+      session_service:
+        type: "memory"
+        default_behavior: "RUN_BASED"          # each question starts clean: a persistent chat drags every earlier tool result into the prompt (6k tokens = minutes on a CPU)
+      artifact_service: *default_artifact_service
+      artifact_handling_mode: "ignore"
+      auto_inject_artifact_tools: false          # keep the prompt small for a local model
+      enable_embed_resolution: false
+      enable_auto_continuation: false     # a reply cut at max_tokens is done; a second LLM call on a CPU is not worth the tail
+      enable_artifact_content_instruction: false
+      data_tools_config: *default_data_tools_config
+      auto_summarization: *default_auto_summarization
+
+      agent_card:
+        description: "Watch officer's assistant: answers questions about the live threat picture and coordinates the IAMD, ship-defense and targeting agents."
+        defaultInputModes: [text]
+        defaultOutputModes: [text]
+        skills:
+          - id: picture_query
+            name: Threat picture queries
+            description: What is inbound, what is engaged, what was recommended, who was notified.
+          - id: agent_coordination
+            name: Agent coordination
+            description: Delegates to the IAMD, ship-defense and targeting agents.
+      agent_card_publishing:
+        interval_seconds: 10
+      agent_discovery:
+        enabled: true
+      inter_agent_communication:
+        # Only this project's specialists. "*" would also pull the Desktop's Orchestrator, Builder and Activity
+        # Monitor cards (and their skill lists) into every prompt: thousands of tokens, minutes on a CPU.
+        # Empty: no delegation tools at all. Each peer tool puts that agent's card and skills into every prompt
+        # (~1k tokens), and this agent answers from the picture itself; the Desktop's Orchestrator delegates.
+        allow_list: []
+        request_timeout_seconds: 600

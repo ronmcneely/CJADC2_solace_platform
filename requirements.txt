@@ -1,0 +1,3 @@
+solace-pubsubplus>=1.8.0
+requests>=2.32
+paho-mqtt>=2.1

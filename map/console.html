@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mesh Console</title>
+<script src="vendor/mqtt.min.js"></script>
+<style>
+  /* One subscriber on cop/# showing what the mesh is doing: who publishes (left, compact), what the broker
+     carries (middle, a few big numbers), and -- the point of the page -- what the fusion service adds to a
+     record and publishes back (right, the wide column). Raw in on the left of each card, fused out on the
+     right with every added field highlighted. */
+  :root { --bg:#0b1220; --bg2:#111a2c; --bg3:#172238; --line:#223050; --text:#e2e8f0; --muted:#8fa3bf; --dim:#5b6b85;
+          --amber:#e39a2b; --teal:#2fa7a0; --teal2:#5ad8d0; --red:#ff5c5c; --green:#7ee0a0; --blue:#4c9be8; --violet:#c9a3ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:13px/1.4 Consolas, "Cascadia Mono", monospace; height:100vh; overflow:hidden; }
+  .hdr { height:44px; display:flex; align-items:center; gap:18px; padding:0 16px; background:var(--bg2); border-bottom:2px solid var(--amber); }
+  .hdr b { font-size:15px; letter-spacing:.5px; }
+  .hdr .st { color:var(--muted); font-size:12px; } .hdr .st i { font-style:normal; color:var(--green); }
+  .hdr .st.off i { color:var(--red); }
+  /* flow strip: the pipeline in one line */
+  .flow { height:64px; background:var(--bg2); border-bottom:1px solid var(--line); display:flex; align-items:center; padding:0 14px; overflow-x:auto; }
+  .fn { background:var(--bg3); border:1px solid var(--line); border-radius:6px; padding:5px 12px; min-width:120px; flex:none; display:flex; flex-direction:column; }
+  .fn .t { font-size:9px; letter-spacing:1.5px; color:var(--muted); text-transform:uppercase; }
+  .fn .v { font-size:19px; font-weight:bold; color:var(--amber); line-height:1.1; } .fn .v small { font-size:10px; color:var(--dim); font-weight:normal; margin-left:4px; }
+  .fn.broker { border-color:#3a4d75; background:#101a30; } .fn.broker .v { color:var(--teal2); }
+  .fn.fus { border-color:var(--teal); box-shadow:0 0 10px rgba(47,167,160,.25); } .fn.fus .v { color:var(--teal2); }
+  .fn.cop .v { color:var(--blue); } .fn.out .v { color:var(--green); }
+  .fe { flex:none; width:54px; text-align:center; color:var(--dim); font-size:9px; line-height:1.2; }
+  .fe .a { color:var(--amber); font-size:18px; display:block; line-height:1; } .fe .a.on { text-shadow:0 0 8px var(--amber); } .fe.back .a { color:var(--green); }
+  .grid { display:grid; grid-template-columns: 300px 250px 1fr; gap:1px; background:var(--line); height:calc(100vh - 44px - 65px); }
+  .col { background:var(--bg); overflow-y:auto; padding:10px 12px; }
+  .col::-webkit-scrollbar { width:6px; } .col::-webkit-scrollbar-thumb { background:var(--line); border-radius:3px; }
+  h2 { font-size:11px; letter-spacing:1.5px; color:var(--muted); margin:6px 0 8px; text-transform:uppercase; display:flex; justify-content:space-between; align-items:baseline; }
+  h2 span { color:var(--amber); } h2 small { color:var(--dim); font-size:10px; letter-spacing:0; text-transform:none; }
+  h3 { font-size:9px; letter-spacing:1.5px; color:var(--dim); margin:10px 0 4px; text-transform:uppercase; }
+  /* sources: one line each */
+  .src { display:grid; grid-template-columns: 14px 1fr auto 52px; gap:0 6px; align-items:center; padding:3px 4px; border-radius:3px; font-size:11px; color:var(--dim); }
+  .src.live { color:var(--text); background:rgba(255,255,255,.02); }
+  .src .n { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; } .src .rt { text-align:right; color:var(--muted); font-size:10px; } .src.live .rt { color:var(--teal2); }
+  .proto { padding:0 5px; border-radius:3px; font-size:9px; font-weight:bold; }
+  .REST { background:#3b2a12; color:var(--amber); } .MQTT { background:#122f33; color:var(--teal2); } .SMF { background:#1a2a44; color:var(--blue); }
+  .dot { display:inline-block; width:7px; height:7px; border-radius:50%; background:#334; }
+  .dot.on { background:var(--green); box-shadow:0 0 6px var(--green); }
+  /* middle */
+  .box { background:var(--bg2); border:1px solid var(--line); border-radius:6px; padding:9px 10px; margin-bottom:8px; }
+  .box .big { font-size:26px; font-weight:bold; color:var(--amber); line-height:1; } .box .lbl { color:var(--muted); font-size:10px; margin-bottom:6px; }
+  .kv { display:flex; justify-content:space-between; gap:8px; padding:3px 0; border-bottom:1px solid var(--line); font-size:11px; color:var(--muted); }
+  .kv:last-child { border-bottom:0; } .kv b { color:var(--text); white-space:nowrap; } .kv b.t { color:var(--teal2); }
+  .dec { padding:4px 0; border-bottom:1px solid var(--line); font-size:11px; line-height:1.35; } .dec:last-child { border-bottom:0; }
+  .dec b { color:var(--amber); } .dec .who { color:var(--dim); }
+  /* fused column */
+  .counts { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px; }
+  .counts span { background:var(--bg3); border:1px solid var(--line); border-radius:3px; padding:3px 9px; font-size:11px; color:var(--muted); cursor:pointer; user-select:none; }
+  .counts span b { color:var(--text); } .counts span.off { opacity:.4; } .counts span.on { border-color:var(--teal2); color:var(--text); }
+  .join { background:var(--bg2); border:1px solid var(--line); border-left:4px solid var(--teal); border-radius:5px; padding:9px 11px; margin-bottom:8px; animation: in .4s ease-out; }
+  .join.voi { border-left-color:var(--red); } .join.action { border-left-color:var(--green); background:#0f1d1a; } .join.cyber { border-left-color:var(--amber); } .join.coal { border-left-color:var(--green); } .join.land { border-left-color:var(--blue); }
+  .join.pinned { border:1px solid var(--green); border-left-width:4px; box-shadow:0 0 14px rgba(126,224,160,.15); }
+  .join .h { display:flex; align-items:baseline; gap:10px; margin-bottom:7px; }
+  .join .h .badge { font-size:9px; letter-spacing:1.5px; padding:2px 7px; border-radius:3px; background:rgba(47,167,160,.18); color:var(--teal2); white-space:nowrap; }
+  .join.voi .badge { background:rgba(255,92,92,.18); color:var(--red); } .join.action .badge { background:rgba(126,224,160,.18); color:var(--green); } .join.cyber .badge { background:rgba(227,154,43,.18); color:var(--amber); }
+  .join.coal .badge { background:rgba(126,224,160,.18); color:var(--green); } .join.land .badge { background:rgba(76,155,232,.18); color:var(--blue); }
+  .join .h b { font-size:13px; flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; } .join .h .ts { color:var(--dim); font-size:10px; white-space:nowrap; }
+  .join .eq { display:grid; grid-template-columns: 1fr 26px 1.25fr; gap:6px; align-items:stretch; }
+  .join .in, .join .out { background:var(--bg); border-radius:4px; padding:6px 8px; font-size:11px; }
+  .join .lbl { font-size:9px; letter-spacing:1.5px; color:var(--dim); margin-bottom:4px; } .join .out .lbl { color:var(--teal2); }
+  .join .in .src-tag { color:var(--dim); font-size:10px; display:block; margin-top:4px; } .join .in .src-tag:first-child { margin-top:0; }
+  .join .in div { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:var(--muted); }
+  .join .out { border:1px solid #1e3a3a; }
+  .join .arrow { color:var(--amber); text-align:center; font-size:18px; align-self:center; }
+  .chips { display:flex; flex-wrap:wrap; gap:4px; }
+  .chip { background:rgba(47,167,160,.12); border:1px solid rgba(47,167,160,.35); border-radius:3px; padding:2px 7px; font-size:11px; color:var(--text); max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .chip small { color:var(--teal2); font-size:9px; letter-spacing:1px; margin-right:5px; text-transform:uppercase; }
+  .chip.hot { border-color:var(--red); background:rgba(255,92,92,.12); } .chip.hot small { color:var(--red); }
+  .chip.ok { border-color:var(--green); background:rgba(126,224,160,.1); } .chip.ok small { color:var(--green); }
+  .join .topic { color:var(--dim); font-size:10px; margin-top:5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; } .join .topic em { font-style:normal; color:var(--muted); }
+  @keyframes in { from { opacity:0; transform:translateY(-4px);} to { opacity:1; transform:none; } }
+  .hint { color:var(--dim); font-size:11px; margin:8px 0; line-height:1.4; } .hint code { color:var(--teal2); }
+  body.paused .hdr { border-bottom-color: var(--red); } body.paused #pause { color: var(--amber); border-color: var(--amber); }
+  .empty { color:var(--dim); font-size:11px; padding:18px; text-align:center; line-height:1.6; }
+</style>
+</head>
+<body>
+<div class="hdr">
+  <b>MESH CONSOLE</b>
+  <span class="st" id="st">broker <i>connecting…</i></span>
+  <span class="st">subscriptions <i style="color:var(--amber)">cop/# · solace-agent-mesh/#</i></span>
+  <span class="st" id="rate">0 msg/s</span>
+  <button id="pause" style="background:#172238;color:#e2e8f0;border:1px solid #2a3a5a;border-radius:4px;padding:3px 12px;font:inherit;cursor:pointer">❚❚ Pause</button>
+  <span style="margin-left:auto;color:var(--dim);font-size:11px">no API server between any of this · <a href="index.html" style="color:var(--teal2)">COP map</a> · <a href="exercise.html" style="color:var(--teal2)">exercise control</a> · <a href="http://localhost:3001" style="color:var(--teal2)">SOAR</a></span>
+</div>
+<div class="flow" id="flow">
+  <div class="fn"><div class="t">Sources live</div><div class="v" id="f_src">0<small>REST · MQTT · SMF</small></div></div>
+  <div class="fe"><span class="a" id="fa1">→</span><span id="f_in">0</span>/s</div>
+  <div class="fn broker"><div class="t">Event broker · conus</div><div class="v" id="f_brk">0<small><span id="f_dmr">0</span> over DMR</small></div></div>
+  <div class="fe"><span class="a" id="fa2">→</span>subscribe</div>
+  <div class="fn fus"><div class="t">Fusion · joins</div><div class="v" id="f_fus">0<small>→ cop/fused</small></div></div>
+  <div class="fe"><span class="a" id="fa3">→</span>cop/#</div>
+  <div class="fn cop"><div class="t">COP map</div><div class="v" id="f_cop">0<small>enriched</small></div></div>
+  <div class="fe"><span class="a" id="fa4">→</span>operator</div>
+  <div class="fn out"><div class="t">Decisions</div><div class="v" id="f_act">0<small>cop/c2/action</small></div></div>
+  <div class="fe back"><span class="a" id="fa5">→</span>records</div>
+  <div class="fn out"><div class="t">Decision records</div><div class="v" id="f_q0">0<small>q.cop.decisions · audit · SOAR</small></div></div>
+</div>
+<div class="grid">
+  <div class="col">
+    <h2>Sources <span id="nsrc">0</span></h2>
+    <div id="sources"></div>
+    <div class="hint">Every system publishes on its own protocol straight into the broker. The hierarchy is the contract.</div>
+  </div>
+  <div class="col">
+    <h2>Broker</h2>
+    <div class="box">
+      <div class="big" id="total">0</div><div class="lbl">events seen by this console</div>
+      <div class="kv"><span>direct (tracks, AIS, ADS-B)</span><b id="cDirect">0</b></div>
+      <div class="kv"><span>guaranteed (intel, alerts, actions, agents)</span><b id="cGuar">0</b></div>
+      <div class="kv"><span>from the forward site over DMR</span><b id="cFwd">0</b></div>
+      <div class="kv"><span>distinct topics</span><b id="cTopics">0</b></div>
+      <div class="kv"><span>alerts raised</span><b id="cAlert">0</b></div>
+      <div class="kv"><span>agent mesh messages</span><b id="cAgent">0</b></div>
+    </div>
+    <div class="box">
+      <h2 style="margin-top:0">Fusion tables <small id="refsrc"></small></h2>
+      <div class="kv"><span>DIA country assessments</span><b class="t" id="rAssess">0</b></div>
+      <div class="kv"><span>DIA threat actors</span><b class="t" id="rActor">0</b></div>
+      <div class="kv"><span>DIA indicators (IOC)</span><b class="t" id="rIoc">0</b></div>
+      <div class="kv"><span>MDA (maritime) vessels of interest</span><b class="t" id="rVoi">0</b></div>
+      <div class="kv"><span>CENTCOM unit readiness</span><b class="t" id="rReady">0</b></div>
+      <div class="hint" style="margin:6px 0 0">held in memory by <code>cop-fusion</code>, filled from the same topics everyone else reads</div>
+    </div>
+    <div class="box">
+      <h2 style="margin-top:0">Operator decisions <small>cop/c2/action</small></h2>
+      <div id="decisions" class="hint" style="margin:0">none yet — take an action on the map</div>
+    </div>
+  </div>
+  <div class="col">
+    <h2>Fused data <small>raw record in · what fusion added · published once for every subscriber</small><span id="njoin">0</span></h2>
+    <div class="counts" id="jcounts"></div>
+    <div id="pinned"></div>
+    <div id="joins"><div class="empty">waiting for the fusion service…</div></div>
+  </div>
+</div>
+<script>
+(function () {
+  const q = new URLSearchParams(location.search);
+  const cfg = { broker: q.get('broker') || ('ws://' + location.hostname + ':8000'), username: q.get('username') || 'cop-viewer', password: q.get('password') || 'cop-demo' };
+
+  // ---- source catalogue: topic prefix -> who is publishing, how, from where
+  const CATALOG = [
+    ['cop/air/track/',       'Aircraft tracker',        'SMF',  'fwd'],
+    ['cop/sea/track/',       'Naval tracker',           'SMF',  'fwd'],
+    ['cop/land/track/',      'Ground-force GPS',        'MQTT', 'fwd'],
+    ['cop/land/site/',       'Facilities',              'SMF',  'fwd'],
+    ['cop/ew/track/',        'EMBM emitter tracks',     'SMF',  'fwd'],
+    ['cop/cyber/incident/',  'Cyber incidents',         'SMF',  'fwd'],
+    ['cop/sigint/intercept/','SIGINT collection',       'SMF',  'fwd'],
+    ['cop/space/image/',     'Satellite imagery',       'SMF',  'fwd'],
+    ['cop/ew/jamming/',      'JSIR jamming reports',    'SMF',  'fwd'],
+    ['cop/air/missile',      'Missile warning (OPIR / radar)', 'SMF', 'fwd'],
+    ['cop/air/uas',          'C-UAS sensors',           'SMF',  'fwd'],
+    ['cop/air/interceptor',  'IAMD fire control (interceptors)', 'SMF', 'fwd'],
+    ['cop/intel/ioc/',       'DIA · indicators',        'REST', 'conus'],
+    ['cop/intel/actor/',     'DIA · threat actors',     'REST', 'conus'],
+    ['cop/intel/assessment/','DIA · country assessments','REST','conus'],
+    ['cop/intel/report/',    'DIA · threat reports',    'REST', 'conus'],
+    ['cop/intel/readiness/', 'CENTCOM · unit readiness','REST', 'conus'],
+    ['cop/intel/equipment/', 'CENTCOM · equipment',     'REST', 'conus'],
+    ['cop/intel/supply/',    'DLA · supply levels',     'REST', 'conus'],
+    ['cop/intel/shipment/',  'DLA · shipments',         'REST', 'conus'],
+    ['cop/sea/ais/',         'MDA (maritime) · AIS vessel tracks', 'MQTT', 'conus'],
+    ['cop/intel/port/',      'MDA (maritime) · port activity',     'MQTT', 'conus'],
+    ['cop/intel/voi/',       'MDA (maritime) · vessels of interest','MQTT','conus'],
+    ['cop/intel/geoint/',    'NGA · change detection',  'MQTT', 'conus'],
+    ['cop/intel/restriction/','NGA · restrictions',     'MQTT', 'conus'],
+    ['cop/air/adsb/',        'FAA · ADS-B',             'MQTT', 'conus'],
+    ['cop/intel/coalition-air/',  'Coalition C2 · air tracks',   'SMF', 'conus'],
+    ['cop/intel/coalition-naval/','Coalition C2 · naval tracks', 'SMF', 'conus'],
+    ['cop/intel/coalition/', 'Coalition C2 · reports',  'SMF',  'conus'],
+    // published back onto the mesh by participants, not external systems
+    ['cop/c2/action/',       'COP operators (the map)', 'MQTT', 'mesh'],
+    ['cop/alert/',           'Alerting service',        'SMF',  'mesh'],
+    ['cop/fused/',           'Fusion service · enrichment', 'SMF', 'mesh'],
+    ['cop/decision/',        'Fusion service · decision records', 'SMF', 'mesh'],
+    // Solace Agent Mesh on the same broker: A2A control plane, and what the agents publish for everyone else
+    ['solace-agent-mesh/a2a/', 'Agent Mesh · A2A (agent ↔ agent, gateway ↔ agent)', 'SMF', 'mesh'],
+    ['solace-agent-mesh/',   'Agent Mesh · control plane, agent cards, Desktop', 'SMF', 'mesh'],
+    ['cop/agent/recommendation/', 'Agents · recommendations (human approves on the COP)', 'SMF', 'mesh'],
+    ['cop/agent/task/',      'Agents · tasking (ISR, BDA)', 'SMF', 'mesh'],
+    ['cop/agent/report/',    'Agents · reports (Event Mesh Gateway)', 'SMF', 'mesh'],
+    ['cop/notify/',          'Agents · notifications (host nation, airspace, OOD/DCC)', 'SMF', 'mesh'],
+  ];
+  const GUARANTEED = /^solace-agent-mesh\/|^cop\/(cyber|sigint|space|intel|c2|alert|decision|agent|notify|mesh)\/|^cop\/ew\/jamming\/|^cop\/air\/(missile|uas|interceptor)-event\/|^cop\/fused\/(cyber|contact)\//;
+  const src = new Map();   // prefix -> {name, proto, site, n, last, lastTopic, win:[]}
+  CATALOG.forEach(([p, name, proto, site]) => src.set(p, { p, name, proto, site, n: 0, last: 0, lastTopic: '', win: [] }));
+  const decisions = [];   // operator actions seen on cop/c2/action/>
+
+  const stats = { total: 0, direct: 0, guar: 0, fwd: 0, alert: 0, act: 0, agent: 0, decisionRecords: 0, topics: new Set(), refs: { assessment: new Set(), actor: new Set(), ioc: new Set(), voi: new Set(), readiness: new Set() }, joins: {}, njoin: 0, win: [] };
+  const raw = new Map();   // entity id -> last raw record (for the join card's left side)
+  const joins = [];
+  let lastDecision = null;
+
+  const $ = id => document.getElementById(id);
+  const esc = s => String(s == null ? '' : s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+
+  function onMessage(topic, rec) {
+    const now = Date.now();
+    stats.total++; stats.win.push(now); stats.topics.add(topic);
+    (GUARANTEED.test(topic) ? stats.guar++ : stats.direct++);
+    const p = topic.split('/');
+    const domain = p[1], event = p[2];
+    for (const [prefix, s] of src) if (topic.startsWith(prefix)) { s.n++; s.last = now; s.lastTopic = topic; s.win.push(now); if (s.site === 'fwd') stats.fwd++; break; }
+    if (domain === 'alert') stats.alert++;
+    if (domain === 'decision') stats.decisionRecords++;
+    if (p[0] === 'solace-agent-mesh' || domain === 'agent' || domain === 'notify') stats.agent++;
+    if (p[0] === 'solace-agent-mesh') return;                       // A2A control plane: counted as a source, not a COP record
+    if (domain === 'c2') { stats.act++; decisions.unshift({ ts: now, topic, rec }); if (decisions.length > 10) decisions.pop(); dirtyJoins = true; }
+    if (domain === 'intel') {
+      if (event === 'assessment') stats.refs.assessment.add(rec.country_code);
+      else if (event === 'actor') stats.refs.actor.add(rec.name);
+      else if (event === 'ioc' && rec.ioc_type === 'ipv4') stats.refs.ioc.add(rec.ioc_value);
+      else if (event === 'voi') stats.refs.voi.add(rec.vessel_name);
+      else if (event === 'readiness') stats.refs.readiness.add(rec.unit_id);
+    }
+    // remember raw records so a join card can show its inputs
+    const id = rec.aircraft_id || rec.vessel_id || rec.unit_id || rec.incident_id || rec.mmsi || rec.track_id;
+    if (id && domain !== 'fused') raw.set(id, { topic, rec, src: sourceOf(topic) });
+    if (raw.size > 600) raw.delete(raw.keys().next().value);
+    if (domain === 'fused' && event === 'stats') { fusionStats = rec; return; }
+    if (domain === 'fused') onFused(event, topic, rec);
+    if (domain === 'decision') onFused('decision', topic, rec);
+  }
+  let fusionStats = null, paused = false, filter = null;
+  function sourceOf(topic) { for (const [prefix, s] of src) if (topic.startsWith(prefix)) return s; return null; }
+
+  // A join card: what came in (left) and the fields fusion added (right, as chips). Only fields the record
+  // did not have before count as "added", so the chips are the enrichment, not a dump of the record.
+  const chip = (k, v, cls) => v == null || v === '' ? '' : `<span class="chip ${cls || ''}"><small>${esc(k)}</small>${esc(v)}</span>`;
+  const HOT = /critical|high|hostile|elevated|offensive|aggressive|advanced|nation.state/i;
+  const hot = v => HOT.test(String(v)) ? 'hot' : '';
+  function onFused(event, topic, rec) {
+    stats.njoin++;
+    let kind, badge, title, left = [], chips = [];
+    const tag = s => s ? `<span class="src-tag">${esc(s.name)} · ${s.proto}</span>` : '';
+    if (event === 'decision') {
+      kind = 'action'; badge = 'DECISION RECORD'; title = `${String(rec.action || '').replace(/_/g, ' ').toUpperCase()} on ${rec.target && rec.target.id || ''} — one record, every source merged`;
+      const tg = rec.target || {}, tl = rec.timeline || {}, en = Object.keys(rec.enrichment || {}), srcs = rec.sources || [], ag = rec.agent || {};
+      left = [`<span class="src-tag">COP operator · MQTT</span><div>${esc(String(rec.action || '').replace(/_/g, ' ').toUpperCase())} by ${esc(rec.operator)}${(rec.action_details || {}).message ? ' · ' + esc(rec.action_details.message) : ''}</div>`,
+              `<span class="src-tag">${esc(tg.kind || 'target')} · full record at decision time</span><div>${esc(tg.summary || tg.id || '')}</div>`,
+              `<span class="src-tag">merged with</span><div>${esc(srcs.filter(s => s.system !== 'COP operator').map(s => s.system).join(' · ') || '—')}</div>`];
+      chips = [chip('decision', rec.decision_id, 'ok'), chip('sources', srcs.length), chip('alerts', (rec.alerts || []).length, (rec.alerts || []).length ? 'hot' : ''),
+               en.length ? chip('enrichment', en.join(', ')) : '',
+               tl.report_to_decision_s != null ? chip('report → decision', tl.report_to_decision_s + ' s') : '', tl.alert_to_decision_s != null ? chip('alert → decision', tl.alert_to_decision_s + ' s') : '',
+               ag.recommendation_id ? chip('agent', (ag.outcome || '') + (ag.recommendation_to_decision_s != null ? ' in ' + ag.recommendation_to_decision_s + ' s' : ''), ag.outcome === 'approved' ? 'ok' : 'hot') : '',
+               (rec.ship || rec.announcement) ? chip('1MC', rec.announcement || rec.ship) : ''];
+      lastDecision = { topic, rec, ts: Date.now() };
+    } else if (rec.fused_of && event !== 'contact') {
+      const r = raw.get(rec.fused_of);
+      if (event === 'cyber') {
+        kind = 'cyber'; badge = 'CYBER ⋈ DIA'; title = `${rec.fused_of} · ${r && r.rec.attack_type ? String(r.rec.attack_type).replace(/_/g, ' ') : 'incident'} attributed`;
+        left = [`${tag(r && r.src)}<div>${esc(rec.fused_of)} · ${esc(r && r.rec.attack_type)} by ${esc(r && r.rec.threat_actor)}</div><div>src ip ${esc(r && r.rec.source_ip)} · ${esc(r && r.rec.target_facility || '')}</div>`,
+                `<span class="src-tag">DIA · REST</span><div>actor profile${rec.ioc_id ? ' · IOC ' + esc(rec.ioc_id) : ''}${rec.dia_threat_level ? ' · country assessment ' + esc(rec.dia_country_name) : ''}</div>`];
+        chips = [chip('affiliation', rec.dia_affiliation, hot(rec.dia_affiliation)), chip('sophistication', rec.dia_sophistication, hot(rec.dia_sophistication)),
+                 rec.ioc_match ? chip('IOC match', rec.ioc_match + ' · ' + (rec.ioc_malware_family || ''), 'hot') : '', chip('country', rec.dia_country_name), chip('threat level', rec.dia_threat_level, hot(rec.dia_threat_level)), chip('priority', rec.dia_priority)];
+      } else if (event === 'land') {
+        kind = 'land'; badge = 'UNIT ⋈ READINESS'; title = `${rec.fused_of} ${r && r.rec.unit_name || ''} · readiness attached`;
+        left = [`${tag(r && r.src)}<div>${esc(rec.fused_of)} ${esc(r && r.rec.unit_name)}</div><div>fuel ${esc(r && r.rec.fuel_level_pct)}% · ammo ${esc(r && r.rec.ammo_level_pct)}%</div>`, `<span class="src-tag">CENTCOM · REST</span><div>readiness record</div>`];
+        chips = [chip('readiness', rec.readiness, /C3|C4/.test(rec.readiness || '') ? 'hot' : 'ok'), chip('training', rec.training_status), chip('equipment OR', Math.round((rec.equipment_or_rate || 0) * 100) + '%'), chip('personnel', `${rec.personnel_available}/${rec.personnel_assigned}`)];
+      } else {
+        kind = 'track'; badge = (event === 'air' ? 'AIR' : 'SEA') + ' TRACK ⋈ DIA'; const t = r && r.rec;
+        title = `${rec.fused_of} ${t && (t.aircraft_type || t.vessel_type) || ''} (${t && t.country || rec.country || ''}) · assessment attached`;
+        left = [`${tag(r && r.src)}<div>${esc(rec.fused_of)} · ${esc(t && (t.aircraft_type || t.vessel_type))} (${esc(t && t.country)})</div><div>${esc(t && t.status)} · ${esc(t && t.speed_kts)} kts · ${esc(t && t.heading_deg)}°</div>`, `<span class="src-tag">DIA · REST</span><div>country assessment ${esc(rec.dia_country_name)}</div>`];
+        chips = [chip('threat level', rec.dia_threat_level, hot(rec.dia_threat_level)), chip('priority', rec.dia_priority), chip('posture', String(rec.dia_posture || '').replace(/_/g, ' '), hot(rec.dia_posture)), chip('active campaigns', rec.dia_active_campaigns)];
+      }
+    } else if (event === 'contact') {
+      kind = 'voi'; badge = 'AIS ⋈ VOI'; title = `${rec.vessel_name} (${rec.flag_country}) · vessel of interest, ${rec.voi_severity}`;
+      left = [`<span class="src-tag">MDA (maritime) AIS · MQTT</span><div>${esc(rec.vessel_name)} (${esc(rec.flag_country)}) · ${esc(rec.vessel_type)}</div><div>mmsi ${esc(rec.mmsi)} → ${esc(rec.destination)}</div>`, `<span class="src-tag">MDA VOI · MQTT</span><div>${esc(rec.voi_alert_id)}</div>`];
+      chips = [chip('status', 'VESSEL OF INTEREST', 'hot'), chip('severity', rec.voi_severity, hot(rec.voi_severity)), chip('reason', rec.voi_reason)];
+    } else {
+      kind = 'coal'; badge = 'COALITION → COP'; const c = rec.coalition || {};
+      title = `${rec.aircraft_id || rec.vessel_id} ${rec.aircraft_type || rec.vessel_type || ''} · ${c.nation || ''} track in COP schema`;
+      left = [`<span class="src-tag">Coalition C2 · SMF</span><div>${esc(rec.aircraft_id || rec.vessel_id)} · ${esc(rec.aircraft_type || rec.vessel_type)}</div><div>${esc(c.nation)}${c.alliance ? ' · ' + esc(c.alliance) : ''}${c.iff ? ' · IFF ' + esc(c.iff) : ''}${c.mission ? ' · ' + esc(c.mission) : ''}</div>`];
+      chips = [chip('iff', 'FRIENDLY', 'ok'), chip('country', rec.country), chip(event === 'air' ? 'aircraft' : 'vessel', rec.aircraft_id || rec.vessel_id), chip('status', rec.status), chip('speed', rec.speed_kts + ' kts'), chip('heading', rec.heading_deg + '°')];
+    }
+    stats.joins[badge] = (stats.joins[badge] || 0) + 1;
+    // collapse repeats of the same entity so the list shows variety
+    const key = badge + '|' + (rec.fused_of || rec.aircraft_id || rec.vessel_id || rec.mmsi || rec.decision_id);
+    const i = joins.findIndex(j => j.key === key);
+    const card = { key, kind, badge, title, topic, left, chips: chips.filter(Boolean), ts: Date.now() };
+    if (i >= 0) joins[i] = card;                       // same entity again: update in place, no churn
+    else { joins.unshift(card); if (joins.length > 40) joins.pop(); }
+    dirtyJoins = true;
+  }
+  function joinHtml(j, pinned) {
+    return `<div class="join ${j.kind} ${pinned ? 'pinned' : ''}"><div class="h"><span class="badge">${pinned ? 'LATEST ' : ''}${esc(j.badge)}</span><b>${esc(j.title)}</b><span class="ts">${new Date(j.ts).toLocaleTimeString()}</span></div>`
+      + `<div class="eq"><div class="in"><div class="lbl">RAW IN</div>${j.left.join('')}</div><div class="arrow">⋈</div><div class="out"><div class="lbl">FUSED OUT · +${j.chips.length} fields</div><div class="chips">${j.chips.join('')}</div></div></div>`
+      + `<div class="topic">published <em>${esc(j.topic)}</em></div></div>`;
+  }
+
+  // ---- render
+  let dirtyJoins = true;
+  function rate(win, now) { while (win.length && now - win[0] > 10000) win.shift(); return (win.length / 10).toFixed(1); }
+  function render() {
+    if (paused) return;
+    const now = Date.now();
+    let live = 0;
+    const html = [];
+    const groups = [['fwd', 'Forward site · over DMR'], ['conus', 'CONUS feeds'], ['mesh', 'Published back by participants']];
+    for (const [site, label] of groups) {
+      const list = [...src.values()].filter(x => x.site === site).sort((a, b) => b.n - a.n);
+      html.push(`<h3>${label}</h3>`);
+      for (const s of list) {
+        const on = now - s.last < 30000; if (on && site !== 'mesh') live++;
+        html.push(`<div class="src ${on ? 'live' : ''}" title="${esc(s.lastTopic || s.p + '…')}"><span class="dot ${on ? 'on' : ''}"></span><span class="n">${esc(s.name)}</span><span class="proto ${s.proto}">${s.proto}</span><span class="rt">${on ? rate(s.win, now) + '/s' : (s.n ? s.n.toLocaleString() : '—')}</span></div>`);
+      }
+    }
+    $('sources').innerHTML = html.join(''); $('nsrc').textContent = live + ' live';
+    $('total').textContent = stats.total.toLocaleString(); $('cDirect').textContent = stats.direct.toLocaleString(); $('cGuar').textContent = stats.guar.toLocaleString();
+    $('cFwd').textContent = stats.fwd.toLocaleString(); $('cTopics').textContent = stats.topics.size.toLocaleString(); $('cAlert').textContent = stats.alert; $('cAgent').textContent = stats.agent.toLocaleString();
+    if (fusionStats && fusionStats.tables) {
+      const t = fusionStats.tables;
+      $('rAssess').textContent = t.assessments; $('rActor').textContent = t.actors; $('rIoc').textContent = t.iocs; $('rVoi').textContent = t.voi; $('rReady').textContent = t.readiness;
+      $('refsrc').textContent = 'cop-fusion up ' + Math.round((fusionStats.uptime_s || 0) / 60) + ' min';
+    } else {
+      $('rAssess').textContent = stats.refs.assessment.size; $('rActor').textContent = stats.refs.actor.size; $('rIoc').textContent = stats.refs.ioc.size; $('rVoi').textContent = stats.refs.voi.size; $('rReady').textContent = stats.refs.readiness.size;
+      $('refsrc').textContent = 'as seen by this page';
+    }
+    $('rate').textContent = rate(stats.win, now) + ' msg/s';
+    // flow strip
+    const liveExt = [...src.values()].filter(x => x.site !== 'mesh' && now - x.last < 30000).length;
+    $('f_src').firstChild.textContent = liveExt; $('f_in').textContent = rate(stats.win, now);
+    $('f_brk').firstChild.textContent = stats.total.toLocaleString(); $('f_dmr').textContent = stats.fwd.toLocaleString();
+    $('f_fus').firstChild.textContent = ((fusionStats && fusionStats.joins && Object.values(fusionStats.joins).reduce((a, b) => a + b, 0)) || stats.njoin).toLocaleString();
+    $('f_cop').firstChild.textContent = stats.njoin.toLocaleString();
+    $('f_act').firstChild.textContent = stats.act; $('f_q0').firstChild.textContent = stats.decisionRecords;
+    const busy = stats.win.length > 0; ['fa1', 'fa2', 'fa3'].forEach(id => $(id).classList.toggle('on', busy));
+    $('fa4').classList.toggle('on', decisions.length > 0 && now - decisions[0].ts < 5000); $('fa5').classList.toggle('on', decisions.length > 0 && now - decisions[0].ts < 5000);
+    if (dirtyJoins) {
+      dirtyJoins = false;
+      $('njoin').textContent = stats.njoin.toLocaleString();
+      if (decisions.length) $('decisions').innerHTML = decisions.map(d => `<div class="dec"><b>${esc(String(d.rec.action || '').replace(/_/g, ' ').toUpperCase())}</b> ${esc(d.rec.target_id || '')}<br><span class="who">${esc(d.rec.domain || '')} · ${esc(d.rec.operator || '')} · ${new Date(d.ts).toLocaleTimeString()}</span></div>`).join('');
+      $('jcounts').innerHTML = Object.entries(stats.joins).map(([k, v]) => `<span data-k="${esc(k)}" class="${filter ? (filter === k ? 'on' : 'off') : ''}">${esc(k)} <b>${v}</b></span>`).join('');
+      const pin = lastDecision && joins.find(j => j.kind === 'action' && j.ts === lastDecision.ts);
+      $('pinned').innerHTML = pin && !filter ? joinHtml(pin, true) : '';
+      const list = joins.filter(j => (!filter || j.badge === filter) && j !== pin);
+      $('joins').innerHTML = list.length ? list.map(j => joinHtml(j, false)).join('') : '<div class="empty">waiting for the fusion service…</div>';
+    }
+  }
+  setInterval(render, 1000);
+  $('pause').addEventListener('click', () => { paused = !paused; document.body.classList.toggle('paused', paused); $('pause').textContent = paused ? '▶ Play' : '❚❚ Pause'; if (!paused) { dirtyJoins = true; render(); } });
+  document.addEventListener('keydown', e => { if (e.code === 'Space' && e.target === document.body) { e.preventDefault(); $('pause').click(); } });
+  $('jcounts').addEventListener('click', e => { const k = e.target.closest('span[data-k]'); if (!k) return; filter = (filter === k.dataset.k) ? null : k.dataset.k; dirtyJoins = true; if (paused) { const p = paused; paused = false; render(); paused = p; } });
+
+  // ---- mesh
+  const client = mqtt.connect(cfg.broker, { username: cfg.username, password: cfg.password, clientId: 'mesh-console-' + Math.random().toString(16).slice(2, 8),
+                                            keepalive: 30, reconnectPeriod: 2000, protocolVersion: 4, clean: true });
+  let lastErr = '';
+  client.on('connect', () => { lastErr = ''; $('st').className = 'st'; $('st').innerHTML = `broker <i>${esc(cfg.broker)}</i>`; ['cop/#', 'solace-agent-mesh/#'].forEach(t => client.subscribe(t, { qos: 0 }, err => { if (err) { $('st').className = 'st off'; $('st').innerHTML = 'subscribe refused <i>' + esc(err.message) + '</i>'; } })); });
+  client.on('error', e => { lastErr = e && e.message ? e.message : String(e); $('st').className = 'st off'; $('st').innerHTML = `broker <i>${esc(cfg.broker)} · ${esc(lastErr)}</i>`; });
+  client.on('close', () => { $('st').className = 'st off'; $('st').innerHTML = `broker <i>${esc(cfg.broker)} · ${esc(lastErr || 'disconnected, retrying')}</i>`; });
+  // A2A traffic (solace-agent-mesh/…) is JSON-RPC, not COP records; it is counted as a source and otherwise left alone.
+  client.on('message', (t, payload) => { let rec; try { rec = JSON.parse(payload.toString()); } catch (e) { rec = {}; } if (!rec || typeof rec !== 'object') rec = {}; onMessage(t, rec); });
+})();
+</script>
+</body>
+</html>

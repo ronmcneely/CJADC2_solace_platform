@@ -1,0 +1,73 @@
+# Ship self-defense agent: triggered by a ship-threat alert (missile/drone aimed at a ship, or a hostile
+# track closing on one). Works out the bearing and range from the ship and hands the OOD and Damage
+# Control Central the 1MC options with the words ready to say.
+log:
+  stdout_log_level: INFO
+  log_file_level: INFO
+  log_file: ship_defense_agent.log
+
+!include ../shared_config.yaml
+
+apps:
+  - name: ship_defense_agent_app
+    app_base_path: .
+    app_module: solace_agent_mesh.agent.sac.app
+    broker:
+      <<: *broker_connection
+
+    app_config:
+      namespace: ${NAMESPACE, solace-agent-mesh/}
+      supports_streaming: true
+      agent_name: "ShipDefenseAgent"
+      display_name: "Ship Self-Defense Agent"
+      model: *general_model
+
+      instruction: |
+        You are the ship self-defense agent for a US Navy surface ship's Combat Information Center. You are invoked when a
+        threat (inbound missile, one-way-attack drone, hostile aircraft or surface craft) is detected against a friendly ship.
+        You MUST call the tool handle_ship_threat(ship_id, contact_id) exactly once, before writing anything: it computes the
+        true and relative bearing, range, closing speed, time to impact and the stage ("immediate": seconds to impact, General
+        Quarters and brace for shock; "tactical": minutes away, General Quarters with the relative bearing spoken digit by digit
+        and the range; "close_in": inside about a mile, CIWS mount warning), and it notifies the Officer of the Deck and Damage
+        Control Central with the recommended alarm, the exact 1MC words and the options. The OOD chooses; you do not sound alarms.
+        After the tool returns, reply in at most three short lines using only its result: THREAT: … (bearing, range, time),
+        1MC: … (the recommended alarm and the exact words), OOD/DCC: notified. Plain text, no headers, no questions.
+
+      tools:
+        - *tool_handle_ship_threat
+        - *tool_ship_geometry
+
+      session_service: *default_session_service
+      artifact_service: *default_artifact_service
+      artifact_handling_mode: "ignore"
+      auto_inject_artifact_tools: false          # keep the prompt small for a local model
+      enable_embed_resolution: false
+      enable_auto_continuation: false     # a reply cut at max_tokens is done; a second LLM call on a CPU is not worth the tail
+      enable_artifact_content_instruction: false
+      inject_system_purpose: false
+      inject_response_format: false
+      data_tools_config: *default_data_tools_config
+      auto_summarization: *default_auto_summarization
+
+      agent_card:
+        description: |
+          Ship self-defense agent. For a threat to a friendly ship it computes bearing, range and time to impact and notifies the
+          Officer of the Deck and Damage Control Central with the 1MC options: General Quarters, Collision alarm, brace for shock,
+          battle stations with bearing and range, CIWS mount warning.
+        defaultInputModes: [text]
+        defaultOutputModes: [text]
+        skills:
+          - id: threat_geometry
+            name: Threat geometry
+            description: Bearing (true and relative), range, closing speed and time to impact between a ship and a contact.
+          - id: ood_dcc_notification
+            name: OOD / DCC notification with 1MC options
+            description: Notifies the ship's watch with the recommended alarm and announcement wording.
+      agent_card_publishing:
+        interval_seconds: 10
+      agent_discovery:
+        enabled: true
+      inter_agent_communication:
+        allow_list: []
+        deny_list: []
+        request_timeout_seconds: 300

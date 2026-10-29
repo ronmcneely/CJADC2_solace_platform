@@ -1,0 +1,178 @@
+# Two self-managed Solace software brokers (Standard edition, free) forming an
+# event mesh over DMR. "conus" is the enterprise/garrison side, "fwd" is the
+# forward site behind an intermittent link.
+#
+#   conus  <== DMR external link ==>  fwd
+#
+# Each broker is started exactly as in the Solace Get Started tutorial
+# "Set Up Your First Event Broker" (image, --shm-size=1g, the eight published
+# ports, admin env vars), plus the scaling parameter and non-default password
+# from that page's production note. The connection tier is 1000 because DMR is
+# not supported at the 100-connection tier (the broker refuses to create a
+# DMR cluster there); 1000 is the Standard edition maximum.
+#   https://docs.solace.com/Get-Started/tutorial/event-broker-set-up.htm
+# The second broker and per-broker routername follow the multi-site DMR example:
+#   https://docs.solace.com/Features/DMR/DMR-Examples-Multi-Site-Config.htm
+#
+# Networks: "mesh" is the inter-site backhaul (the satellite link); "fwd-site"
+# is the forward site's local network, which stays up when the backhaul drops,
+# so sensors and operators at the forward site keep talking to their broker.
+#
+# Pull the "satellite link" with:  scripts/link.sh down   (and ... up)
+
+services:
+  conus:
+    image: solace/solace-pubsub-standard
+    container_name: solace-conus
+    hostname: conus
+    shm_size: 1g
+    environment:
+      - username_admin_globalaccesslevel=admin
+      - username_admin_password=${SEMP_PASSWORD:-admin}
+      - system_scaling_maxconnectioncount=1000
+      - routername=conus
+    ports:
+      - "8080:8080"     # SEMP + Broker Manager
+      - "55555:55555"   # SMF
+      - "8008:8008"     # SMF over WebSocket
+      - "1883:1883"     # MQTT
+      - "8000:8000"     # MQTT over WebSocket (browser map)
+      - "5672:5672"     # AMQP 1.0
+      - "9000:9000"     # REST inbound
+      - "2222:2222"     # SSH to the broker CLI
+    networks: [mesh]
+    volumes:
+      - conus-storage:/var/lib/solace
+
+  fwd:
+    image: solace/solace-pubsub-standard
+    container_name: solace-fwd
+    hostname: fwd
+    shm_size: 1g
+    environment:
+      - username_admin_globalaccesslevel=admin
+      - username_admin_password=${SEMP_PASSWORD:-admin}
+      - system_scaling_maxconnectioncount=1000
+      - routername=fwd
+    ports:
+      - "8081:8080"
+      - "55556:55555"
+      - "8009:8008"
+      - "1884:1883"
+      - "8001:8000"
+      - "5673:5672"
+      - "9001:9000"
+      - "2223:2222"
+    networks: [fwd-site, mesh]
+    volumes:
+      - fwd-storage:/var/lib/solace
+
+  # The COP: static files, served by nginx. The page itself talks to the
+  # broker over MQTT/WebSocket from the browser; nginx only hands out the HTML.
+  cop-map:
+    image: nginx:1.27-alpine
+    container_name: cop-map
+    volumes:
+      - ./map:/usr/share/nginx/html:ro
+    ports:
+      - "3000:80"
+    networks: [mesh]
+
+  # SOAR / ticketing intake: the target of the broker's REST Delivery Point.
+  # Plain HTTP server, no Solace client; the broker POSTs every cop/alert/>
+  # to it (configured by broker/bootstrap.py, visible in Broker Manager under
+  # Clients > REST Delivery Points). Page at http://localhost:3001
+  cop-sink:
+    image: python:3.12-alpine
+    container_name: cop-sink
+    command: python /app/sink.py
+    volumes:
+      - ./services/sink:/app:ro
+    ports:
+      - "3001:8088"
+    networks: [mesh]
+
+  # ---- the applications, as containers ---------------------------------
+  # `docker compose --profile apps up -d` runs the whole demo in one command.
+  # Without the profile only the brokers, the map and the sink start, and the
+  # applications are run from terminals (docs/quick-boot.md), which is better
+  # for showing their logs.
+  generator:
+    build: .
+    image: edge-cop-apps
+    container_name: cop-generator
+    command: python3 sim/generator.py
+    environment: [SOLACE_HOST=tcp://fwd:55555, MQTT_HOST=fwd, MQTT_PORT=1883]
+    networks: [fwd-site]
+    depends_on: [fwd]
+    profiles: [apps]
+  agency-feeds:
+    image: edge-cop-apps
+    container_name: cop-agency-feeds
+    command: python3 sim/agency_feeds.py
+    environment: [SOLACE_HOST=tcp://conus:55555, SOLACE_REST=http://conus:9000, MQTT_HOST=conus, MQTT_PORT=1883]
+    networks: [mesh]
+    depends_on: [conus]
+    profiles: [apps]
+  alerting:
+    image: edge-cop-apps
+    container_name: cop-alerting
+    command: python3 services/alerting.py
+    environment: [SOLACE_HOST=tcp://conus:55555]
+    networks: [mesh]
+    depends_on: [conus]
+    profiles: [apps]
+  fusion:
+    image: edge-cop-apps
+    container_name: cop-fusion
+    command: python3 services/fusion.py
+    environment: [SOLACE_HOST=tcp://conus:55555]
+    networks: [mesh]
+    depends_on: [conus]
+    profiles: [apps]
+
+  # ---- the agent mesh ---------------------------------------------------
+  # `docker compose --profile mesh up -d --build` adds Solace Agent Mesh on the
+  # same CONUS broker (Message VPN cop, username agent-mesh) and a local LLM.
+  # The agents are event-driven: the Event Mesh Gateway turns launch events and
+  # ship-threat alerts into A2A tasks; agents answer on cop/agent/> and
+  # cop/notify/>. Chat UI at http://localhost:8010. See docs/agent-mesh.md.
+  ollama:
+    image: ollama/ollama:latest
+    container_name: solace-ollama
+    environment:
+      - OLLAMA_NUM_PARALLEL=1           # one request at a time: two slots on a CPU cut generation from ~20 to ~2 tokens/s for both
+      - OLLAMA_KEEP_ALIVE=2h            # keep the model loaded between salvos
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama     # pull once (docker exec solace-ollama ollama pull qwen2.5:3b); air-gapped after that
+    networks: [mesh]
+    profiles: [mesh]
+  agent-mesh:
+    build: ./mesh
+    image: edge-cop-agent-mesh
+    container_name: cop-agent-mesh
+    env_file: [mesh/.env]
+    stop_grace_period: 3s             # restarts are frequent while tuning agents; nothing here needs a slow stop
+    ports:
+      - "8010:8000"                     # Agent Mesh web UI (the broker already uses 8000 for MQTT/WS)
+    volumes:
+      - ./mesh/configs:/mesh/configs:ro # edit an agent's instructions, restart the container
+      - ./mesh/src:/mesh/src:ro
+      - mesh-data:/mesh/data
+    networks: [mesh]
+    depends_on: [conus, ollama]
+    profiles: [mesh]
+
+networks:
+  mesh:
+    name: cop-mesh
+  fwd-site:
+    name: cop-fwd-site
+
+volumes:
+  conus-storage:
+  fwd-storage:
+  ollama-models:
+  mesh-data:

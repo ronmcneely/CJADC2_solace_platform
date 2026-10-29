@@ -1,0 +1,11 @@
+Edge COP on Solace — edge-cop-solace
+
+Documentation (README.md, everything under docs/, and the explanatory comments in the
+configuration and source files):
+
+    © 2026 Ron McNeely. Provided for evaluation; no license to reproduce or
+    redistribute the documentation.
+
+Third-party components keep their own licenses: Solace PubSub+ Standard and Solace Agent
+Mesh (Solace), Leaflet (BSD-2-Clause), MQTT.js (MIT), Ollama and the Qwen2.5 models
+(their respective licenses), and the Python packages listed in requirements.txt.
